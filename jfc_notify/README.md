@@ -58,6 +58,8 @@ The supplied report identifies an AArch64 Host with kernel `6.6.0-ub+`, Ascend95
 
 This is enough to build the Host resource probe. The library filename does not establish a package release or header/library ABI match. Queue creation, actual provider loading, AICPU access, and notification delivery remain untested. The directory permission errors make the filesystem inventory incomplete, but the required Host header/core/provider candidates were found. No `libaicpu_kernels.so` candidate appeared in this search; that does not establish its absence from the device environment.
 
+The subsequent target enumeration **passed**: URMA initialization, device/EID enumeration, and uninitialization succeeded. It returned ten devices, `udmac{0,1}d1e{2,3,4,5,6}`. All have EID index 0; each `e6` device has nine EIDs. Queue creation and delivery remain untested. Version 1 reported the executable as `loaded_urma`; this diagnostic bug is reproducible locally with a non-PIE build, where the function address identifies a PLT entry. Version 2 resolves the symbol definition through `dlsym(RTLD_NEXT, ...)` before inspecting its owner.
+
 ## Build and run the Host receive-resource probe
 
 Copy `host_receive_probe.c` and `build_host_probe.sh` to this directory on the target. Build in the same environment as the inventory:
@@ -89,6 +91,17 @@ Replace `DEVICE_NAME` and `EID_INDEX` with values from the list. The probe valid
 5. Delete the JFR before unregistering/freeing its posted buffer, then delete the JFC, JFCE, and context and uninitialize URMA.
 
 Each step prints one short status line. `host_receive_resources=PASS` requires all steps and cleanup to succeed. A cleanup error stops dependent releases and returns failure. A registration failure describes this ordinary pinned-memory setup; it does not rule out another provider-supported memory allocation path. The probe never imports or exports a remote endpoint, submits SEND/READ/WRITE work, or arms/waits for events.
+
+For the target enumeration already received, a concrete first resource check is:
+
+```bash
+bash build_host_probe.sh
+./host_receive_probe --device udmac0d1e2 --eid-index 0 \
+  > host-urma-resources.txt 2>&1
+cat host-urma-resources.txt
+```
+
+Use the updated version-2 source when rebuilding. This pair is explicitly present in the report, with EID `00000000003f020000100000df080b00`. It is a Host resource-test candidate, not a confirmed route to a particular NPU. Before device SEND, establish the intended NPU's endpoint mapping; the inspected driver's UB connection path obtains that mapping through `dms_get_ub_dev_info`, rather than deriving it from the `udmac...` name.
 
 This checks Host receive-resource setup and an empty poll only. It does **not** prove receipt of a message, event wakeup, device visibility, or graph replay. The next functional probe must add a sender in the actual intended AICPU execution context and validate both its local send completion and the Host's receive completion.
 

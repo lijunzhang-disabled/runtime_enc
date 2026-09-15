@@ -62,8 +62,20 @@ static void print_eid(const urma_eid_t *eid)
 
 static void print_library(void)
 {
+    /* A direct &urma_init can identify the executable's PLT entry in a non-PIE
+     * build. Look up the next symbol definition after this executable instead.
+     * This reports its owner without opening a second URMA library instance.
+     */
+    (void)dlerror();
+    void *implementation = dlsym(RTLD_NEXT, "urma_init");
+    const char *lookup_error = dlerror();
+    if (lookup_error || !implementation) {
+        printf("loaded_urma=UNKNOWN lookup_error=%s\n",
+               lookup_error ? lookup_error : "null symbol address");
+        return;
+    }
     Dl_info info = {0};
-    if (dladdr((void *)urma_init, &info) && info.dli_fname) {
+    if (dladdr(implementation, &info) && info.dli_fname) {
         char *resolved = realpath(info.dli_fname, NULL);
         printf("loaded_urma=%s\n", resolved ? resolved : info.dli_fname);
         free(resolved);
@@ -347,7 +359,7 @@ int main(int argc, char **argv)
     }
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    printf("probe=host_receive_resources version=1 mode=%s\n", list ? "list" : "resources");
+    printf("probe=host_receive_resources version=2 mode=%s\n", list ? "list" : "resources");
     print_library();
     errno = 0;
     if (!check_status("urma_init", urma_init(NULL))) {
