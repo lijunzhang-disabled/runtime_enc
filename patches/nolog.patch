@@ -1,0 +1,271 @@
+diff --git a/src/runtime/core/inc/memory/secure_dma/secure_dma_log.h b/src/runtime/core/inc/memory/secure_dma/secure_dma_log.h
+index ccbc7525a..d323269b9 100644
+--- a/src/runtime/core/inc/memory/secure_dma/secure_dma_log.h
++++ b/src/runtime/core/inc/memory/secure_dma/secure_dma_log.h
+@@ -17,13 +17,13 @@
+ namespace secure_dma {
+ enum class LogLevel : std::uint32_t {
+     kOff = 0U,
+-    kError = 1U,     // failures only
+-    kInfo = 2U,      // one line per transfer, plus key and routing decisions  -- the default
++    kError = 1U,     // failures only -- the default
++    kInfo = 2U,      // per-transfer records, key and routing decisions; opt in explicitly
+     kDetail = 3U,    // one line per chunk per stage
+     kTrace = 4U,     // digests, nonces, addresses; the "prove it" level
+ };
+ 
+-/* Current level, from ASCEND_SECURE_DMA_LOG. Cheap enough to call on a hot path guard. */
++/* Cached ASCEND_SECURE_DMA_LOG level. Unset, empty or invalid values use errors only. */
+ LogLevel CurrentLogLevel();
+ 
+ inline bool LogEnabled(const LogLevel level)
+diff --git a/src/runtime/core/src/memory/secure_dma/secure_dma_log.cc b/src/runtime/core/src/memory/secure_dma/secure_dma_log.cc
+index 751334ee2..ee681d14c 100644
+--- a/src/runtime/core/src/memory/secure_dma/secure_dma_log.cc
++++ b/src/runtime/core/src/memory/secure_dma/secure_dma_log.cc
+@@ -19,11 +19,9 @@
+ /*
+  * Implementation of the host side log. See secure_dma_log.h for what each record is for.
+  *
+- * DESTINATION. Records go to stderr, not to the runtime's own log. That is a deliberate choice for the
+- * bring up phase: the acceptance scripts capture stderr directly, the records survive a run that ends in a
+- * device abort, and nothing has to be configured on the target for them to appear. It also keeps this TU
+- * free of the runtime log header, so that lean TUs can call in here without dragging that include closure
+- * behind them -- which is the failure this file's header comment warns about.
++ * Records go to stderr so acceptance scripts can capture them without runtime log dependencies.
++ * Successful transfers are silent by default. Verbose diagnostics require ASCEND_SECURE_DMA_LOG,
++ * and each entry point checks its level before formatting a record.
+  */
+ namespace secure_dma {
+ namespace {
+@@ -32,22 +30,18 @@ constexpr const char *kPrefix = "[SECDMA]";
+ LogLevel ParseLevel()
+ {
+     const char *raw = std::getenv("ASCEND_SECURE_DMA_LOG");
+-    if (raw == nullptr) {
+-        return LogLevel::kInfo;
++    if ((raw == nullptr) || (raw[0] == '\0')) {
++        return LogLevel::kError;
+     }
+     if (std::strcmp(raw, "off") == 0) { return LogLevel::kOff; }
+     if (std::strcmp(raw, "error") == 0) { return LogLevel::kError; }
+     if (std::strcmp(raw, "info") == 0) { return LogLevel::kInfo; }
+     if (std::strcmp(raw, "detail") == 0) { return LogLevel::kDetail; }
+     if (std::strcmp(raw, "trace") == 0) { return LogLevel::kTrace; }
+-    /*
+-     * An unrecognised value is a typo in a test script, and silently falling back to the default would hide
+-     * it for the length of a campaign. Say so once and take the most verbose reading, because somebody who
+-     * set the variable at all wanted more output rather than less.
+-     */
+-    (void)std::fprintf(stderr, "%s level=? unrecognised ASCEND_SECURE_DMA_LOG=\"%s\", using trace\n",
++    // Report invalid configuration once without enabling verbose replay logging.
++    (void)std::fprintf(stderr, "%s level=? unrecognised ASCEND_SECURE_DMA_LOG=\"%s\", using error\n",
+                        kPrefix, raw);
+-    return LogLevel::kTrace;
++    return LogLevel::kError;
+ }
+ 
+ void Emit(const LogLevel level, const char *body)
+@@ -62,10 +56,7 @@ void Emit(const LogLevel level, const char *body)
+ 
+ LogLevel CurrentLogLevel()
+ {
+-    /*
+-     * Read the environment once. A per call getenv would be a syscall-shaped cost on a path that logs per
+-     * chunk, and the level is not meant to change inside a process.
+-     */
++    // Cache the level so replay paths do not re-read the environment.
+     static const LogLevel level = ParseLevel();
+     return level;
+ }
+@@ -100,6 +91,7 @@ std::uint64_t BufferDigest(const void *data, const std::size_t length)
+ void LogRoute(const std::uint64_t serial, const char *decision, const std::uint32_t kind,
+               const std::size_t length, const char *reason)
+ {
++    if (!LogEnabled(LogLevel::kInfo)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body), "ROUTE  xfer=%llu decision=%s kind=%u len=%zu reason=%s",
+                         static_cast<unsigned long long>(serial), decision, kind, length, reason);
+@@ -109,11 +101,7 @@ void LogRoute(const std::uint64_t serial, const char *decision, const std::uint3
+ void LogKey(const std::uint64_t serial, const char *side, const std::uint32_t fingerprint, const bool valid,
+             const char *source)
+ {
+-    /*
+-     * Always at info, never suppressed below it. If somebody is diagnosing a failure at all, the first thing
+-     * they need is whether the two sides are holding the same key, and asking them to re-run at a higher
+-     * level to find that out wastes a machine slot.
+-     */
++    if (!LogEnabled(LogLevel::kInfo)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body), "KEY    xfer=%llu side=%s fingerprint=0x%08x valid=%s source=%s",
+                         static_cast<unsigned long long>(serial), side, fingerprint, valid ? "yes" : "NO",
+@@ -124,6 +112,7 @@ void LogKey(const std::uint64_t serial, const char *side, const std::uint32_t fi
+ void LogSetup(const std::uint64_t serial, const char *mode, const std::uint64_t ctrlAddr,
+               const std::uint64_t chanAddr, const std::uint32_t chunkCount, const std::uint32_t chunkSize)
+ {
++    if (!LogEnabled(LogLevel::kInfo)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body),
+                         "SETUP  xfer=%llu mode=%s ctrl=0x%llx chan=0x%llx chunks=%u chunkSize=%u",
+@@ -136,6 +125,7 @@ void LogSetup(const std::uint64_t serial, const char *mode, const std::uint64_t
+ void LogHandshake(const std::uint64_t serial, const char *event, const std::uint32_t hostUp,
+                   const std::uint32_t deviceUp, const std::uint64_t elapsedUs)
+ {
++    if (!LogEnabled(LogLevel::kInfo)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body), "HSHAKE xfer=%llu event=%s hostUp=%u deviceUp=%u elapsed=%lluus",
+                         static_cast<unsigned long long>(serial), event, hostUp, deviceUp,
+@@ -147,6 +137,7 @@ void LogSeal(const std::uint64_t serial, const std::uint32_t chunkIndex, const s
+              const std::uint64_t plainDigest, const std::uint64_t cipherDigest, const std::uint64_t nonceHead,
+              const std::uint64_t elapsedUs)
+ {
++    if (!LogEnabled(LogLevel::kDetail)) { return; }
+     /*
+      * At the detail level the digests are not computed -- each costs a pass over the buffer -- and printing
+      * them as zeros would be worse than omitting them. `plain=0x0 cipher=0x0` is EXACTLY what an unencrypted
+@@ -180,6 +171,7 @@ void LogUnseal(const std::uint64_t serial, const std::uint32_t chunkIndex, const
+                const std::uint64_t cipherDigest, const std::uint64_t plainDigest, const std::int32_t status,
+                const std::uint64_t elapsedUs)
+ {
++    if (!LogEnabled(LogLevel::kDetail)) { return; }
+     /* See the note in LogSeal: zeros here would read as an unencrypted payload. */
+     char digests[192];
+     if (LogEnabled(LogLevel::kTrace)) {
+@@ -200,6 +192,7 @@ void LogUnseal(const std::uint64_t serial, const std::uint32_t chunkIndex, const
+ void LogWait(const std::uint64_t serial, const char *const what, const std::uint32_t chunkIndex,
+              const std::uint64_t elapsedUs, const std::int32_t status)
+ {
++    if (!LogEnabled(LogLevel::kDetail)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body), "WAIT   xfer=%llu what=%s chunk=%u elapsed=%lluus status=%d",
+                         static_cast<unsigned long long>(serial), what, chunkIndex,
+@@ -210,6 +203,7 @@ void LogWait(const std::uint64_t serial, const char *const what, const std::uint
+ void LogShip(const std::uint64_t serial, const std::uint32_t chunkIndex, const char *direction,
+              const std::uint64_t bytes, const std::uint64_t elapsedUs)
+ {
++    if (!LogEnabled(LogLevel::kDetail)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body), "SHIP   xfer=%llu chunk=%u dir=%s bytes=%llu elapsed=%lluus",
+                         static_cast<unsigned long long>(serial), chunkIndex, direction,
+@@ -221,6 +215,7 @@ void LogShip(const std::uint64_t serial, const std::uint32_t chunkIndex, const c
+ void LogChunkState(const std::uint64_t serial, const std::uint32_t chunkIndex, const char *from,
+                    const char *to)
+ {
++    if (!LogEnabled(LogLevel::kDetail)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body), "STATE  xfer=%llu chunk=%u %s->%s",
+                         static_cast<unsigned long long>(serial), chunkIndex, from, to);
+@@ -230,18 +225,22 @@ void LogChunkState(const std::uint64_t serial, const std::uint32_t chunkIndex, c
+ void LogComplete(const std::uint64_t serial, const char *direction, const std::uint32_t chunkCount,
+                  const std::uint64_t totalBytes, const std::uint64_t elapsedUs, const std::int32_t status)
+ {
++    const LogLevel level = status == 0 ? LogLevel::kInfo : LogLevel::kError;
++    if (!LogEnabled(level)) { return; }
+     char body[256];
+     (void)std::snprintf(body, sizeof(body),
+                         "DONE   xfer=%llu dir=%s chunks=%u bytes=%llu elapsed=%lluus status=%d",
+                         static_cast<unsigned long long>(serial), direction, chunkCount,
+                         static_cast<unsigned long long>(totalBytes),
+                         static_cast<unsigned long long>(elapsedUs), status);
+-    Emit(status == 0 ? LogLevel::kInfo : LogLevel::kError, body);
++    Emit(level, body);
+ }
+ 
+ void LogRelease(const std::uint64_t serial, const std::uint64_t ctrlAddr, const bool deviceDoneObserved,
+                 const char *note)
+ {
++    const LogLevel level = deviceDoneObserved ? LogLevel::kInfo : LogLevel::kError;
++    if (!LogEnabled(level)) { return; }
+     /*
+      * deviceDoneObserved is the field worth reading. A release that went ahead WITHOUT it is the timeout
+      * path, and on that path we are relying on an assumption the source does not support -- that a watchdog
+@@ -253,13 +252,14 @@ void LogRelease(const std::uint64_t serial, const std::uint64_t ctrlAddr, const
+                         static_cast<unsigned long long>(serial),
+                         static_cast<unsigned long long>(ctrlAddr),
+                         deviceDoneObserved ? "observed" : "NOT-OBSERVED", note);
+-    Emit(deviceDoneObserved ? LogLevel::kInfo : LogLevel::kError, body);
++    Emit(level, body);
+ }
+ 
+ void LogTracePoint(const std::uint64_t serial, const std::uint32_t index, const std::uint32_t site,
+                    const char *const siteName, const std::uint32_t sequence, const std::uint64_t a,
+                    const std::uint64_t b, const std::uint64_t c)
+ {
++    if (!LogEnabled(LogLevel::kInfo)) { return; }
+     char body[320];
+     (void)std::snprintf(body, sizeof(body),
+                         "DTRACE xfer=%llu slot=%u seq=%u site=%#06x %s a=%#llx b=%#llx c=%#llx",
+@@ -272,6 +272,8 @@ void LogTracePoint(const std::uint64_t serial, const std::uint32_t index, const
+ void LogTraceSummary(const std::uint64_t serial, const bool armed, const std::uint32_t started,
+                      const std::uint32_t reported, const bool wrapped)
+ {
++    const LogLevel level = armed ? LogLevel::kInfo : LogLevel::kError;
++    if (!LogEnabled(level)) { return; }
+     /*
+      * Emitted at error level when the buffer never armed, because that is the strongest statement this
+      * channel can make: the operator could not write to a region the host had already prepared.
+@@ -281,11 +283,12 @@ void LogTraceSummary(const std::uint64_t serial, const bool armed, const std::ui
+                         "DTRACE xfer=%llu summary armed=%s started=%u reported=%u wrapped=%s",
+                         static_cast<unsigned long long>(serial), armed ? "yes" : "NO", started, reported,
+                         wrapped ? "yes" : "no");
+-    Emit(armed ? LogLevel::kInfo : LogLevel::kError, body);
++    Emit(level, body);
+ }
+ 
+ void LogFailure(const std::uint64_t serial, const char *stage, const std::int32_t status, const char *detail)
+ {
++    if (!LogEnabled(LogLevel::kError)) { return; }
+     char body[320];
+     (void)std::snprintf(body, sizeof(body), "FAIL   xfer=%llu stage=%s status=%d detail=%s",
+                         static_cast<unsigned long long>(serial), stage, status, detail);
+@@ -297,6 +300,7 @@ void LogAttribution(const std::uint64_t serial, const std::int32_t status, const
+                     const std::uint32_t deviceStatus, const std::uint32_t chunkCount,
+                     const std::uint32_t firstUnfinished, const char *const firstUnfinishedState)
+ {
++    if (!LogEnabled(LogLevel::kError)) { return; }
+     /*
+      * Always at error level. A transfer only reaches here by failing, and the whole point is that the reader
+      * should not have to re-run at a higher verbosity to find out where it stopped -- a rerun costs a
+@@ -315,7 +319,7 @@ void LogCryptoFailure(const std::uint64_t serial, const std::uint32_t chunkIndex
+                     const std::uint32_t hostKeyFingerprint, const std::uint32_t deviceKeyFingerprint,
+                     const char *hint)
+ {
+-
++    if (!LogEnabled(LogLevel::kError)) { return; }
+     (void)std::fprintf(stderr,
+                        "%s FAIL   stage=crypto xfer=%llu chunk=%u hostKey=0x%08x deviceKey=0x%08x %s hint=%s\n",
+                        kPrefix, static_cast<unsigned long long>(serial), chunkIndex, hostKeyFingerprint,
+diff --git a/src/runtime/core/src/memory/secure_dma/secure_dma_runtime.cc b/src/runtime/core/src/memory/secure_dma/secure_dma_runtime.cc
+index 36e095afa..9c8a9aeb0 100644
+--- a/src/runtime/core/src/memory/secure_dma/secure_dma_runtime.cc
++++ b/src/runtime/core/src/memory/secure_dma/secure_dma_runtime.cc
+@@ -182,7 +182,7 @@ std::int32_t Dispatch::Arm()
+     if (soPath == nullptr) {
+         armed_ = true;
+         sideLoaded_ = false;
+-        RT_LOG(RT_LOG_INFO, "Secure DMA will dispatch %s by name; it must be present in the platform's "
++        RT_LOG(RT_LOG_DEBUG, "Secure DMA will dispatch %s by name; it must be present in the platform's "
+                "AICPU kernels package. Set %s to side load an artifact instead.", kAicpuKernelName,
+                kAicpuSoPathEnv);
+         return kStatusOk;
+@@ -221,7 +221,7 @@ std::int32_t Dispatch::Arm()
+     kernel_->SetAicpuKernelType_(static_cast<uint32_t>(KERNEL_TYPE_AICPU));
+     armed_ = true;
+     sideLoaded_ = true;
+-    RT_LOG(RT_LOG_INFO, "Secure DMA side loaded %s from %s and declared the built in kernel type.",
++    RT_LOG(RT_LOG_DEBUG, "Secure DMA side loaded %s from %s and declared the built in kernel type.",
+            kAicpuKernelName, soPath);
+     return kStatusOk;
+ }
+diff --git a/tests/secure_dma_host/test_fixed_completion.cc b/tests/secure_dma_host/test_fixed_completion.cc
+index 98ed0022f..ac86e5eab 100644
+--- a/tests/secure_dma_host/test_fixed_completion.cc
++++ b/tests/secure_dma_host/test_fixed_completion.cc
+@@ -2,6 +2,7 @@
+ #include "memory/secure_dma/secure_dma_capture_resource.h"
+ #include <cassert>
+ #include <thread>
++#include <initializer_list>
+ using namespace secure_dma;
+ int main()
+ {
