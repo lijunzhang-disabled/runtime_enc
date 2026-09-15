@@ -12,6 +12,18 @@ Copy `collect_target_inventory.py` to the target. From the directory containing 
 python3 collect_target_inventory.py --output target-urma-inventory.json
 ```
 
+The default report is concise: driver/compiler/device summaries, up to three canonical library candidates per kind, up to three paths per header name, and missing URMA exports. Duplicate aliases and raw command output are excluded. Counts show how many candidates were omitted; listed paths are not a claim about which library is loaded.
+
+If you already generated a large report, convert it with the updated script without running inventory commands again:
+
+```bash
+python3 collect_target_inventory.py \
+  --from-report target-urma-inventory.json \
+  --output target-urma-summary.json
+```
+
+Use `--full` only if the full inventory is needed for follow-up diagnosis.
+
 Use the same shell/library environment normally used to run your isolated `iter-007` Runtime. If the SDK or isolated installation is outside the standard directories, add its root:
 
 ```bash
@@ -25,7 +37,7 @@ Python 3 is required. `readelf`, `npu-smi`, and a C++ compiler are inspected whe
 
 The script performs filesystem/ELF inspection and runs bounded inventory commands (`npu-smi info`, `ldconfig -p`, `readelf`, and compiler version). It does not load vendor libraries, create contexts/queues, submit work, install packages, or reset devices. Its only writes are the requested report and its parent directories.
 
-Share the printed summary and the report's `libraries`, `headers`, `ub_sysfs`, and `driver_version_files` sections. The report contains installation paths and device inventory; it does not collect key material or the complete process environment.
+Share the concise JSON report. It contains installation paths and device inventory; it does not collect key material or the complete process environment.
 
 ## How to interpret the result
 

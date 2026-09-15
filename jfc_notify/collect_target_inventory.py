@@ -112,15 +112,153 @@ def library_info(path, aliases):
     return details
 
 
+def short_text(value, limit=300):
+    value = str(value).strip()
+    return value if len(value) <= limit else value[:limit] + "..."
+
+
+def command_summary(result, lines=1):
+    summary = {"status": result.get("status", "unknown")}
+    if result.get("argv"):
+        summary["executable"] = result["argv"][0]
+    if "returncode" in result:
+        summary["returncode"] = result["returncode"]
+    useful = [line.strip() for line in result.get("stdout", "").splitlines()
+              if any(char.isalnum() for char in line)]
+    if useful:
+        summary["summary"] = [short_text(line, 180) for line in useful[:lines]]
+    error = result.get("stderr") or result.get("error")
+    if error:
+        summary["error"] = short_text(error)
+    return summary
+
+
+def library_kind(library):
+    names = [Path(library["path"]).name]
+    names += [Path(alias).name for alias in library.get("aliases", [])]
+    for kind, prefix in (("urma", "liburma.so"), ("hal", "libascend_hal.so"),
+                         ("runtime", "libruntime.so"), ("acl", "libascendcl.so"),
+                         ("aicpu", "libaicpu_kernels.so")):
+        if any(name.startswith(prefix) for name in names):
+            return kind
+    return "provider"
+
+
+def concise_report(report):
+    if report.get("format") == "concise":
+        return report
+    limit = 3
+    machine = report.get("machine", "unknown")
+    expected_elf = {"aarch64": "AArch64", "x86_64": "Advanced Micro Devices X86-64"}.get(machine)
+
+    def priority(library):
+        path = library["path"]
+        parts = set(Path(path).parts)
+        # Rank plausible Host libraries first, without claiming loader selection.
+        stub = bool(parts & {"stub", "stubs", "devlib"})
+        matches = library.get("elf", {}).get("Machine") == expected_elf
+        return (stub, not matches, len(path), path)
+
+    groups = {}
+    for library in report.get("libraries", []):
+        groups.setdefault(library_kind(library), {})[library["path"]] = library
+    libraries = {}
+    for kind, entries in sorted(groups.items()):
+        candidates = []
+        for library in sorted(entries.values(), key=priority)[:limit]:
+            candidate = {"path": library["path"],
+                         "machine": library.get("elf", {}).get("Machine", "not_inspected")}
+            if kind == "urma":
+                exports = library.get("required_exports")
+                if exports is not None:
+                    candidate["missing_exports"] = [name for name in URMA_SYMBOLS if exports.get(name) is False]
+                    unchecked = [name for name in URMA_SYMBOLS if name not in exports]
+                    candidate["exports_checked"] = len(URMA_SYMBOLS) - len(unchecked)
+                    if unchecked:
+                        candidate["unchecked_exports"] = unchecked
+                else:
+                    candidate["exports_checked"] = 0
+            for check in ("elf_inspection", "symbol_inspection"):
+                if check in library:
+                    candidate[check] = command_summary(library[check], lines=0)
+            candidates.append(candidate)
+        libraries[kind] = {"found": len(entries), "candidates": candidates,
+                           "omitted": max(0, len(entries) - limit)}
+
+    header_groups = {}
+    for header in report.get("headers", []):
+        path = header["path"]
+        header_groups.setdefault(Path(path).name, set()).add(path)
+    headers = {name: {"found": len(paths), "paths": sorted(paths, key=lambda p: (len(p), p))[:limit],
+                      "omitted": max(0, len(paths) - limit)}
+               for name, paths in sorted(header_groups.items())}
+    versions = []
+    for entry in report.get("driver_version_files", [])[:2]:
+        lines = [line.strip() for line in entry.get("text", "").splitlines() if line.strip()]
+        relevant = [line for line in lines if any(word in line.lower()
+                    for word in ("version", "release", "build", "package"))]
+        versions.append({"path": entry["path"],
+                         "summary": [short_text(line, 180) for line in (relevant or lines)[:6]]})
+    nodes = report.get("device_nodes", [])
+    warnings = report.get("search_warnings", [])
+    return {
+        "schema_version": 2, "format": "concise",
+        "purpose": "Host inventory only; listed paths are candidates, not verified loaded libraries",
+        "timestamp_utc": report.get("timestamp_utc"), "machine": machine,
+        "kernel": report.get("kernel"),
+        "driver_version": versions,
+        "npu_smi": command_summary(report.get("npu_smi", {}), lines=6),
+        "compiler": command_summary(report.get("compiler", {})),
+        "device_nodes": {"count": len(nodes), "sample": nodes[:8]},
+        "ub_sysfs": {path: {"count": len(names), "sample": names[:8]}
+                     for path, names in report.get("ub_sysfs", {}).items()},
+        "libraries": libraries, "headers": headers,
+        "search": {"roots_checked": len(report.get("searched_roots", [])),
+                   "warning_count": len(warnings), "warnings": [short_text(w) for w in warnings[:4]]},
+        "functional_checks": {name: report.get(name, "NOT_TESTED") for name in (
+            "host_queue_creation", "device_side_urma", "device_to_host_notification")},
+    }
+
+
+def write_report(report, output_path, full):
+    if not full:
+        report = concise_report(report)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("x") as output:
+        json.dump(report, output, indent=2)
+        output.write("\n")
+    print(f"Report: {output_path.resolve()} ({output_path.stat().st_size} bytes)")
+    print(f"Architecture: {report.get('machine', 'unknown')}")
+    if not full:
+        for kind, group in report["libraries"].items():
+            print(f"{kind}: {group['found']} found, {len(group['candidates'])} shown")
+    print("Report collection does not establish URMA/AICPU functionality.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
                         help="New JSON report path; existing files are not overwritten")
     parser.add_argument("--search-root", type=Path, action="append", default=[],
                         help="Additional installed SDK/library directory; may be repeated")
+    parser.add_argument("--full", action="store_true",
+                        help="Include all paths, aliases, and raw command output; default is concise")
+    parser.add_argument("--from-report", type=Path,
+                        help="Summarize a previously collected JSON report without probing again")
     args = parser.parse_args()
     if args.output.exists():
         parser.error(f"report already exists: {args.output}")
+    if args.from_report:
+        if args.full or args.search_root:
+            parser.error("--from-report cannot be combined with --full or --search-root")
+        try:
+            report = json.loads(args.from_report.read_text())
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        if not isinstance(report, dict) or report.get("schema_version") not in (1, 2):
+            parser.error("expected an inventory report generated by this script")
+        write_report(report, args.output, full=False)
+        return 0
 
     roots = [Path(p) for p in (
         "/usr/local/Ascend", "/usr/local/ub", "/opt/ub", "/usr/include",
@@ -178,21 +316,7 @@ def main():
         "host_queue_creation": "NOT_TESTED",
         "device_to_host_notification": "NOT_TESTED",
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("x") as output:
-        json.dump(report, output, indent=2)
-        output.write("\n")
-    print(f"Report: {args.output.resolve()}")
-    print(f"Architecture: {report['machine']}")
-    print(f"NPU inventory: {report['npu_smi']['status']}, rc={report['npu_smi'].get('returncode', 'n/a')}")
-    print(f"URMA API headers: {sum(Path(h['path']).name == 'urma_api.h' for h in headers)}")
-    for library in libraries:
-        if "required_exports" in library:
-            missing = [name for name, present in library["required_exports"].items() if not present]
-            print(f"URMA library: {library['path']}")
-            print("Missing inspected exports: " + (", ".join(missing) if missing else "none"))
-    print(f"Discovered libraries: {len(libraries)}; search warnings: {len(errors)}")
-    print("Host queues / AICPU URMA / device-to-Host notification: NOT TESTED")
+    write_report(report, args.output, args.full)
     return 0  # Success means the inventory was collected, not that hardware support passed.
 
 
