@@ -47,6 +47,53 @@ Share the concise JSON report. It contains installation paths and device invento
 - An absent header or library is a search result, not proof that the target lacks support. Add a narrower `--search-root` for a nonstandard install. Directory symlinks are not recursively followed, and searches have depth/entry limits.
 - The script runs on the Host. Device/AICPU loader access, context creation, memory visibility, and notification delivery remain untested.
 
+## Target inventory received on 2026-09-15
+
+The supplied report identifies an AArch64 Host with kernel `6.6.0-ub+`, Ascend950DT devices, driver `25.6.rc1.b163`, HAL `7.35.23`, and GCC `12.3.1`. It found:
+
+- URMA core: `/usr/lib64/liburma.so.0.0.3`; all 26 inspected exports are present.
+- UDMA provider candidate: `/usr/lib64/urma/liburma-udma.so`.
+- Matching installed header candidates: `/usr/include/ub/umdk/urma/`.
+- Ten entries in `/sys/class/uburma`; the names have the form `udmac0d1e2`.
+
+This is enough to build the Host resource probe. The library filename does not establish a package release or header/library ABI match. Queue creation, actual provider loading, AICPU access, and notification delivery remain untested. The directory permission errors make the filesystem inventory incomplete, but the required Host header/core/provider candidates were found. No `libaicpu_kernels.so` candidate appeared in this search; that does not establish its absence from the device environment.
+
+## Build and run the Host receive-resource probe
+
+Copy `host_receive_probe.c` and `build_host_probe.sh` to this directory on the target. Build in the same environment as the inventory:
+
+```bash
+bash build_host_probe.sh
+./host_receive_probe --list > host-urma-list.txt 2>&1
+cat host-urma-list.txt
+```
+
+The build uses the installed target headers and the reported versioned library path, so it does not require an unversioned `liburma.so` development symlink. Override `URMA_INCLUDE_DIR`, `URMA_LIBRARY`, `CC`, or `PROBE_OUTPUT` if needed. The binary prints `loaded_urma` because the dynamic loader can choose a different library via its normal search rules. Compare that path with the build's link library.
+
+List mode initializes URMA, lists device names and valid EID indices, and uninitializes it. It creates no contexts or queues. At most eight EIDs per device are printed, with an omitted count. Share this short text first; a UB device name or EID index is not an NPU logical ID, and this probe does not establish their mapping.
+
+After selecting a listed endpoint, run the resource check with its exact name and index:
+
+```bash
+./host_receive_probe --device DEVICE_NAME --eid-index EID_INDEX \
+  > host-urma-resources.txt 2>&1
+cat host-urma-resources.txt
+```
+
+Replace `DEVICE_NAME` and `EID_INDEX` with values from the list. The probe validates the selection and performs these steps:
+
+1. Query the device's RM transport, queue-depth, and receive-SGE capabilities.
+2. Create one context, one JFCE, one depth-16 JFC, and one depth-16 JFR.
+3. Allocate and register one page of ordinary Host memory with local-only segment access; use a fresh token for this process's resources.
+4. Post one 64-byte receive slot and call `urma_poll_jfc()` once. Zero completions is expected because this stage has no sender.
+5. Delete the JFR before unregistering/freeing its posted buffer, then delete the JFC, JFCE, and context and uninitialize URMA.
+
+Each step prints one short status line. `host_receive_resources=PASS` requires all steps and cleanup to succeed. A cleanup error stops dependent releases and returns failure. A registration failure describes this ordinary pinned-memory setup; it does not rule out another provider-supported memory allocation path. The probe never imports or exports a remote endpoint, submits SEND/READ/WRITE work, or arms/waits for events.
+
+This checks Host receive-resource setup and an empty poll only. It does **not** prove receipt of a message, event wakeup, device visibility, or graph replay. The next functional probe must add a sender in the actual intended AICPU execution context and validate both its local send completion and the Host's receive completion.
+
+Local validation uses the source-reference headers and a mock URMA library. It checks compilation, command-line validation, call order, and failure cleanup; the target build and real hardware behavior still need the above runs. Queue configuration follows the driver's HDC JFR example and HCOMM's local-only segment registration, without copying their application-specific memory allocator or remote endpoint setup.
+
 ## Next two functional checks
 
 1. **Host receive resources:** compile against the target's matching URMA headers/library; enumerate device/EID choices, explicitly select one, create a dedicated JFCE/JFC/JFR, register and post a receive buffer, and cleanly tear down through the supported API. Do not borrow the synchronous-copy driver's pooled queues.
