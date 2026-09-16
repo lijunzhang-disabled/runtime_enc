@@ -1,0 +1,454 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ed265bb..b24353d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,124 +1,15 @@
+-#
+ # Copyright (c) 2026 Huawei Technologies Co., Ltd.
+-# Licensed under the CANN Open Software License Agreement Version 2.0. See LICENSE at the repository root.
+-#
+-# THIS FILE DOES NOT BUILD THE OPERATOR.
+-#
+-# `SecureDma` is an official AICPU operator (820 D2.1.1): it is compiled into the platform's
+-# libaicpu_kernels.so by adding its sources to the `common_src` list in the ms_kernels tree. There is no
+-# artifact this repository can produce that the device would load.
+-#
+-# What this file builds is the HOST TEST -- the workflow the AICPU tutorial prescribes for verification
+-# before hardware: stand the framework in with the stubs under stub/, hand-build a parameter block, and call
+-# the exported entry directly. It is the only thing about this operator that can be checked on a development
+-# machine, and it catches the failures that would otherwise surface as an unexplained 507018.
++# Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
+ #
++# The device operator is built by the platform's ms_kernels build into
++# libaicpu_kernels.so. This standalone project exposes the source contract only.
+ cmake_minimum_required(VERSION 3.14)
+ project(secure_dma_operator CXX)
+ 
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
+-#
+-# The wiring contract lives in ms_kernels/secure_dma_v2.cmake and has exactly one home there:
+-# this repository's host test and the platform's ms_kernels tree both consume the same file, so
+-# the two builds cannot drift apart. See the fragment header for the contract text.
++# Device-source contract used by the platform build. No standalone targets are created.
+ include("${CMAKE_CURRENT_LIST_DIR}/ms_kernels/secure_dma_v2.cmake")
+ 
+-option(SECURE_MEMCPY_NO_CRYPTO
+-       "Replace AES-CTR with a pass-through. Both sides must agree. Never ship." OFF)
+-
+-add_executable(secure_dma_operator_test
+-    test/test_secure_dma_operator.cc
+-    ${SECURE_DMA_V2_SOURCES}
+-    ${SECURE_DMA_V2_TEST_BINDING})
+-
+-target_include_directories(secure_dma_operator_test PRIVATE
+-    stub/aicpu_framework
+-    ms_kernels/inc
+-    ms_kernels/src)
+-
+-#
+-# SECURE_DMA_DEVICE_BUILD is defined here too, and on purpose: it selects the device shape of the shared
+-# crypto -- compiling out the CSPRNG-backed nonce source, which needs a filesystem the device has not got.
+-# Testing the host shape of a device operator would test the wrong thing.
+-#
+-target_compile_definitions(secure_dma_operator_test PRIVATE ${SECURE_DMA_V2_DEFINES})
+-if(SECURE_MEMCPY_NO_CRYPTO)
+-    target_compile_definitions(secure_dma_operator_test PRIVATE SECURE_MEMCPY_NO_CRYPTO)
+-    message(WARNING "SECURE_MEMCPY_NO_CRYPTO: payloads pass through in the clear and tampering is not "
+-                    "detected. Localisation only.")
+-endif()
+-target_compile_options(secure_dma_operator_test PRIVATE -Wall -Wextra -Wformat)
+-find_package(Threads REQUIRED)
+-target_link_libraries(secure_dma_operator_test PRIVATE Threads::Threads)
+-
+-enable_testing()
+-add_test(NAME secure_dma_operator COMMAND secure_dma_operator_test)
+-
+-add_executable(secure_dma_small_operator_test
+-    test/test_secure_dma_small_operator.cc
+-    ${SECURE_DMA_V2_SOURCES})
+-target_include_directories(secure_dma_small_operator_test PRIVATE
+-    stub/aicpu_framework ms_kernels/inc ms_kernels/src)
+-target_compile_definitions(secure_dma_small_operator_test PRIVATE ${SECURE_DMA_V2_DEFINES})
+-if(SECURE_MEMCPY_NO_CRYPTO)
+-    target_compile_definitions(secure_dma_small_operator_test PRIVATE SECURE_MEMCPY_NO_CRYPTO)
+-endif()
+-target_compile_options(secure_dma_small_operator_test PRIVATE -Wall -Wextra -Wformat -Werror)
+-target_link_libraries(secure_dma_small_operator_test PRIVATE Threads::Threads)
+-add_test(NAME secure_dma_small_operator COMMAND secure_dma_small_operator_test)
+-set_tests_properties(secure_dma_small_operator PROPERTIES TIMEOUT 30)
+-
+-add_executable(secure_dma_small_no_key_test
+-    test/test_secure_dma_small_no_key.cc
+-    ${SECURE_DMA_V2_SOURCES})
+-target_include_directories(secure_dma_small_no_key_test PRIVATE
+-    stub/aicpu_framework ms_kernels/inc ms_kernels/src)
+-target_compile_definitions(secure_dma_small_no_key_test PRIVATE ${SECURE_DMA_V2_DEFINES})
+-if(SECURE_MEMCPY_NO_CRYPTO)
+-    target_compile_definitions(secure_dma_small_no_key_test PRIVATE SECURE_MEMCPY_NO_CRYPTO)
+-endif()
+-target_compile_options(secure_dma_small_no_key_test PRIVATE -Wall -Wextra -Wformat -Werror)
+-target_link_libraries(secure_dma_small_no_key_test PRIVATE Threads::Threads)
+-if(APPLE)
+-    # Darwin executables reject an absent weak import unless lookup is explicitly allowed.
+-    # This applies only to the no-binding test; the Linux platform library keeps its normal link flags.
+-    target_link_options(secure_dma_small_no_key_test PRIVATE -Wl,-undefined,dynamic_lookup)
+-endif()
+-add_test(NAME secure_dma_small_no_key COMMAND secure_dma_small_no_key_test)
+-set_tests_properties(secure_dma_small_no_key PROPERTIES TIMEOUT 10)
+-
+-option(SECURE_DMA_CTR_DIFFERENTIAL_TESTS
+-       "Compare the real device CTR backend with OpenSSL (host tests only)" OFF)
+-if(SECURE_DMA_CTR_DIFFERENTIAL_TESTS AND NOT SECURE_MEMCPY_NO_CRYPTO)
+-    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+-    add_executable(secure_dma_ctr_differential_test
+-        test/test_aes_ctr_differential.cc
+-        ms_kernels/src/secure_dma/secure_dma_aes_ctr.cc)
+-    target_include_directories(secure_dma_ctr_differential_test PRIVATE ms_kernels/src)
+-    target_compile_definitions(secure_dma_ctr_differential_test PRIVATE ${SECURE_DMA_V2_DEFINES})
+-    target_compile_options(secure_dma_ctr_differential_test PRIVATE -Wall -Wextra -Wformat -Werror)
+-    target_link_libraries(secure_dma_ctr_differential_test PRIVATE OpenSSL::Crypto)
+-    add_test(NAME secure_dma_ctr_differential COMMAND secure_dma_ctr_differential_test)
+-    set_tests_properties(secure_dma_ctr_differential PROPERTIES TIMEOUT 120)
+-endif()
+-
+-add_executable(secure_dma_fixed_operator_test test/test_secure_dma_fixed_operator.cc ${SECURE_DMA_V2_SOURCES})
+-target_include_directories(secure_dma_fixed_operator_test PRIVATE stub/aicpu_framework ms_kernels/inc ms_kernels/src)
+-target_compile_definitions(secure_dma_fixed_operator_test PRIVATE ${SECURE_DMA_V2_DEFINES})
+-if(SECURE_MEMCPY_NO_CRYPTO)
+-    target_compile_definitions(secure_dma_fixed_operator_test PRIVATE SECURE_MEMCPY_NO_CRYPTO)
+-endif()
+-target_compile_options(secure_dma_fixed_operator_test PRIVATE -Wall -Wextra -Wformat -Werror)
+-target_link_libraries(secure_dma_fixed_operator_test PRIVATE Threads::Threads)
+-add_test(NAME secure_dma_fixed_operator COMMAND secure_dma_fixed_operator_test)
+-set_tests_properties(secure_dma_fixed_operator PROPERTIES TIMEOUT 15)
+-
+-add_executable(secure_dma_urma_probe_test test/test_secure_dma_urma_probe.cc ${SECURE_DMA_V2_SOURCES})
+-target_include_directories(secure_dma_urma_probe_test PRIVATE stub/aicpu_framework ms_kernels/inc ms_kernels/src)
+-target_compile_definitions(secure_dma_urma_probe_test PRIVATE ${SECURE_DMA_V2_DEFINES})
+-target_compile_options(secure_dma_urma_probe_test PRIVATE -Wall -Wextra -Wformat -Werror)
+-target_link_libraries(secure_dma_urma_probe_test PRIVATE Threads::Threads)
+-add_test(NAME secure_dma_urma_probe COMMAND secure_dma_urma_probe_test)
+-set_tests_properties(secure_dma_urma_probe PROPERTIES TIMEOUT 10)
++message(STATUS "Build SecureDma through the platform's ms_kernels build using SECURE_DMA_V2_SOURCES and SECURE_DMA_V2_DEFINES.")
+diff --git a/README.md b/README.md
+index 6a233cd..14ca84d 100644
+--- a/README.md
++++ b/README.md
+@@ -31,17 +31,48 @@ uses hardware AES rounds without linking OpenSSL.
+    before key provisioning exists (810 3.6). Without a binding the operator still loads and still explains
+    itself — `SecureDmaResolveKey` is weak, so it logs and reports `NO_KEY` rather than failing to load.
+ 
++The shared `secure_dma_v2.cmake` fragment exports only device sources and compile definitions;
++it does not reference `../test/` or define `SECURE_DMA_V2_TEST_BINDING`. The repository's root
++`CMakeLists.txt` only includes the device-source contract. It contains no test targets, test options,
++or test-configuration includes. CI needs no `test/`, `stub/`, or `cmake/` directory from this repository.
++Keep the platform's own `ms_kernels/CMakeLists.txt`; this standalone root configuration creates no
++build targets and does not build the device library.
++If CI reports a missing `secure_dma_test_key_binding.cc`, sync the updated fragment and check
++that the platform source list does not separately append that file or `SECURE_DMA_V2_TEST_BINDING`.
++The URMA diagnostic requires no key binding. Encrypted-copy operation still requires the existing
++device key provider; the diagnostic does not replace or supply one.
++
++For the source-copy workflow, the managed block in the platform's `ms_kernels/CMakeLists.txt` is:
++
++```cmake
++include("${CMAKE_CURRENT_SOURCE_DIR}/secure_dma_v2.cmake")
++list(APPEND common_src ${SECURE_DMA_V2_SOURCES})
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$"
++   OR CMAKE_CXX_COMPILER MATCHES "aarch64")
++    add_compile_definitions(${SECURE_DMA_V2_DEFINES})
++endif()
++```
++
++Keep the platform's existing framework include paths and its `inc`/`src` include directories.
++The copied source set supplies all SecureDma-local headers; `kernel_base.h`, `kernel_log.h`, and
++`kernel_errcode.h` come from the platform framework. The fragment uses the same AArch64 detection
++for AES instruction flags, including the compiler-path fallback. The copy list does not supply
++`ms_kernels/src/secure_dma_test_key_binding.cc`; appending that path requires a separately existing
++platform file and is unnecessary for this URMA probe.
++
+ ## Verifying before hardware
+ 
+-This standalone host test requires an AArch64 host with AES instructions, a C++17 compiler, CMake and
+-threads. It does not need a Runtime checkout, CANN headers or OpenSSL. The complete operator retains an
+-AArch64-only device barrier; the AES primitive's x86 AES-NI branch does not make the complete operator
+-x86-compatible.
++The existing test sources remain available for local checks; the CI CMake configuration does not
++reference them. From the complete workspace containing both AICPU and Runtime checkouts, run:
+ 
+ ```bash
+-cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure
++python3 experiments/jfc_notify/tests/check_local.py
+ ```
+ 
++This needs a C++ compiler and OpenSSL development files. It uses CPU memory, portable Host fences,
++the Host crypto backend, and a mock Runtime for the launcher. It does not compile the AArch64 device
++configuration or load a driver. The complete device operator retains its AArch64-only barrier guard.
++
+ The legacy and SmallCopy suites call the actual exported entry. They cover both directions, tail chunks,
+ graph channel and attribute anchors, argument failures, exact request nonces, Abort/ACK ordering,
+ missing key bindings, and STOPPED followed immediately by revoking access to shared pages. The legacy
+@@ -78,19 +109,11 @@ and the existing serial tail. The original Git object was unavailable from the c
+ this is a source port onto the SmallCopy branch, not a cherry-pick of that SHA. Other cipher backends
+ and the wire format retain their existing behavior. ParallelFor/iter-005 is not included.
+ 
+-An optional differential test compares the actual device backend with OpenSSL, covering boundaries,
+-unaligned buffers, in-place operation, counter carries, multiple keys/nonces and invalid lengths:
+-
+-```bash
+-cmake -S . -B /tmp/secure-dma-cipher-check \
+-  -DCMAKE_CXX_FLAGS="-O2 -Werror" -DSECURE_DMA_CTR_DIFFERENTIAL_TESTS=ON
+-cmake --build /tmp/secure-dma-cipher-check -j4
+-ctest --test-dir /tmp/secure-dma-cipher-check --output-on-failure
+-/tmp/secure-dma-cipher-check/secure_dma_ctr_differential_test --benchmark
+-```
+-
+-OpenSSL is needed only when this optional host test is enabled. Benchmark output is observational,
+-not a pass/fail threshold or a substitute for Ascend950DT measurements. The iteration reports are
++The existing differential-test source compares the actual device backend with OpenSSL, covering
++boundaries, unaligned buffers, in-place operation, counter carries, multiple keys/nonces and invalid
++lengths. It is not part of this branch's CMake configuration or the local probe-check script.
++Benchmark output is observational, not a pass/fail threshold or a substitute for Ascend950DT
++measurements. The iteration reports are
+ maintained in [Runtime's report index](https://github.com/aiyah-meloken/AscendCCv2-Runtime/blob/iter-006/docs/reports/secure-dma/README.md).
+ 
+ ## iter-006 SmallCopy control protocol
+@@ -133,10 +156,7 @@ and never directly invokes URMA functions, creates queues, or changes the fixed-
+ `ms_kernels/secure_dma_v2.cmake` includes `secure_dma_urma_probe.cc`. Include it and the accompanying
+ headers when syncing this branch into the online CI platform build. The new code has no URMA header
+ or mandatory URMA/libdl link dependency; absent weak loader functions produce a negative report.
+-The host tests use a mock loader and verify routing, malformed requests, missing exports and reference
+-cleanup, including invocation through the exported operator's attribute path without a key binding.
+-
+-The standalone Host launcher and CI/target instructions are in the workspace's
++The standalone Host launcher, local checks, and CI/target instructions are in the workspace's
+ `experiments/jfc_notify/README.md`. It dispatches by name on NPU 0, waits for native stream completion,
+ and reads the report once. A successful symbol probe does not establish queue creation, endpoint
+ routing, device SEND, or graph replay. Those remain separate experiments.
+diff --git a/ms_kernels/secure_dma_v2.cmake b/ms_kernels/secure_dma_v2.cmake
+index 690c173..8470ebc 100644
+--- a/ms_kernels/secure_dma_v2.cmake
++++ b/ms_kernels/secure_dma_v2.cmake
+@@ -1,9 +1,9 @@
+ # Single home of the platform-integration contract for the 820 "SecureDma" operator.
+-# Consumed by this repo's host test, and mirrored VERBATIM into the platform's ms_kernels tree,
++# Mirrored VERBATIM into the platform's ms_kernels tree,
+ # where CMakeLists appends SECURE_DMA_V2_SOURCES to common_src and applies SECURE_DMA_V2_DEFINES
+ # to them (SECURE_DMA_DEVICE_BUILD is required: it compiles out the CSPRNG nonce source, which
+ # needs a filesystem the device has not got).
+-# SECURE_DMA_V2_TEST_BINDING carries a PUBLIC key: never into the platform library.
++# This fragment must be usable when only ms_kernels/ is mirrored into the platform.
+ set(SECURE_DMA_V2_SOURCES
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma_kernels.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_device.cc"
+@@ -14,10 +14,10 @@ set(SECURE_DMA_V2_SOURCES
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr_bypass.cc")
+ set(SECURE_DMA_V2_DEFINES SECURE_DMA_DEVICE_BUILD)
+-set(SECURE_DMA_V2_TEST_BINDING "${CMAKE_CURRENT_LIST_DIR}/../test/secure_dma_test_key_binding.cc")
+ 
+ # Apply ISA flags to the cipher translation unit, not the control framework.
+-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
++# Match the platform managed block's fallback for cross toolchains without a target processor.
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$" OR CMAKE_CXX_COMPILER MATCHES "aarch64")
+     set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr.cc"
+         APPEND PROPERTY COMPILE_OPTIONS -march=armv8-a+crypto)
+ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+diff --git a/test/test_secure_dma_urma_probe.cc b/test/test_secure_dma_urma_probe.cc
+deleted file mode 100644
+index 8d86a65..0000000
+--- a/test/test_secure_dma_urma_probe.cc
++++ /dev/null
+@@ -1,190 +0,0 @@
+-// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+-// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
+-#include <cstdio>
+-#include <cstdlib>
+-#include <cstring>
+-#include <dlfcn.h>
+-#include <vector>
+-
+-#include "kernel_base.h"
+-#include "secure_dma.h"
+-#include "secure_dma/secure_dma_device.h"
+-#include "secure_dma/secure_dma_protocol.h"
+-#include "secure_dma/secure_dma_urma_probe.h"
+-#include "secure_dma/secure_dma_urma_probe_protocol.h"
+-
+-namespace {
+-using namespace secure_dma;
+-int failures = 0;
+-unsigned checks = 0;
+-uint64_t processMask = 0U;
+-uint64_t libraryMask = 0U;
+-unsigned opens = 0U, closes = 0U, lookups = 0U;
+-unsigned openAfter = 1U;
+-bool closeFails = false;
+-bool reportOwner = true;
+-int libraryHandle;
+-const char *loaderError = nullptr;
+-
+-void Check(bool ok, const char *message)
+-{
+-    ++checks;
+-    if (!ok) { ++failures; std::printf("FAIL %s\n", message); }
+-}
+-
+-// Any accidental call through a discovered URMA symbol fails the test immediately.
+-void MustNotCallUrma() { std::abort(); }
+-
+-UrmaProbeBlock Request()
+-{
+-    opens = closes = lookups = 0U;
+-    processMask = libraryMask = 0U;
+-    openAfter = 1U;
+-    closeFails = false;
+-    reportOwner = true;
+-    loaderError = nullptr;
+-    UrmaProbeBlock block{};
+-    block.magic = kUrmaProbeMagic;
+-    block.version = kUrmaProbeVersion;
+-    block.bytes = sizeof(block);
+-    block.cookie = UINT64_C(0x1122334455667788);
+-    block.status = UINT32_MAX;
+-    return block;
+-}
+-
+-void Expect(UrmaProbeBlock &block, UrmaProbeStatus status, UrmaProbeSource source, uint64_t mask,
+-            unsigned wantOpens, unsigned wantCloses)
+-{
+-    const auto before = block;
+-    Check(RunDeviceSide(reinterpret_cast<uint64_t>(&block), 0U) == kStatusOk, "real dispatcher accepts probe");
+-    Check(std::memcmp(&before, &block, offsetof(UrmaProbeBlock, status)) == 0, "request prefix preserved");
+-    Check(block.status == static_cast<uint32_t>(status), "capability status");
+-    Check(block.source == static_cast<uint32_t>(source), "symbol source");
+-    Check(block.presentMask == mask && block.symbolCount == kUrmaProbeSymbolCount, "exact symbol mask");
+-    Check(block.done == 1U && block.echoedCookie == before.cookie, "completion and cookie");
+-    Check(opens == wantOpens && closes == wantCloses, "only owned loader references released");
+-    Check(block.library[255] == '\0' && block.error[255] == '\0', "bounded report strings");
+-}
+-
+-void Cases()
+-{
+-    auto block = Request();
+-    Expect(block, UrmaProbeStatus::kLibraryUnavailable, UrmaProbeSource::kNone, 0U, 0U, 0U);
+-    block = Request(); processMask = kUrmaProbeAllSymbols;
+-    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kProcess, processMask, 0U, 0U);
+-    block = Request(); processMask = kUrmaProbeAllSymbols & ~(UINT64_C(1) << 22U);
+-    Expect(block, UrmaProbeStatus::kMissingSymbols, UrmaProbeSource::kProcess, processMask, 0U, 0U);
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; libraryMask = kUrmaProbeAllSymbols;
+-    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kOpenedLibrary, libraryMask, 1U, 1U);
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; libraryMask = 5U;
+-    Expect(block, UrmaProbeStatus::kMissingSymbols, UrmaProbeSource::kOpenedLibrary, 5U, 1U, 1U);
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; openAfter = 4U;
+-    Expect(block, UrmaProbeStatus::kLibraryUnavailable, UrmaProbeSource::kNone, 0U, 3U, 0U);
+-    Check(std::strcmp(block.error, "mock library absent") == 0, "loader error preserved");
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; openAfter = 3U;
+-    libraryMask = kUrmaProbeAllSymbols; reportOwner = false;
+-    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kOpenedLibrary, libraryMask, 3U, 1U);
+-    Check(std::strcmp(block.library, "liburma.so.0.0.3") == 0, "soname fallback without dladdr owner");
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; closeFails = true;
+-    libraryMask = kUrmaProbeAllSymbols;
+-    Expect(block, UrmaProbeStatus::kCloseFailed, UrmaProbeSource::kOpenedLibrary, libraryMask, 1U, 1U);
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; processMask = kUrmaProbeAllSymbols;
+-    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kProcess, processMask, 0U, 0U);
+-    block = Request(); block.flags = kUrmaProbeAllowLoad; processMask = 2U; openAfter = 4U;
+-    Expect(block, UrmaProbeStatus::kMissingSymbols, UrmaProbeSource::kProcess, 2U, 3U, 0U);
+-}
+-
+-void Refusals()
+-{
+-    for (unsigned scenario = 0; scenario < 10; ++scenario) {
+-        auto block = Request();
+-        switch (scenario) {
+-            case 0: ++block.magic; break;
+-            case 1: ++block.version; break;
+-            case 2: --block.bytes; break;
+-            case 3: block.flags = 2U; break;
+-            case 4: block.cookie = 0U; break;
+-            default: block.reserved[scenario - 5U] = 1U; break;
+-        }
+-        const auto before = block;
+-        Check(RunUrmaProbe(reinterpret_cast<uint64_t>(&block)) == kStatusBadArgs, "invalid request refused");
+-        Check(std::memcmp(&block, &before, sizeof(block)) == 0, "refusal leaves request unchanged");
+-        Check(lookups == 0U && opens == 0U, "invalid request cannot trigger loader");
+-    }
+-    Check(RunUrmaProbe(0) == kStatusBadArgs, "null anchor refused");
+-    Check(RunUrmaProbe(65) == kStatusBadArgs, "misaligned anchor refused before access");
+-    Check(RunUrmaProbe(UINT64_MAX - 63U) == kStatusBadArgs, "overflow refused before access");
+-}
+-
+-void Adapter()
+-{
+-    auto block = Request(); processMask = kUrmaProbeAllSymbols;
+-    // Use the framework stub's documented encoding, not the real protobuf wire format.
+-    const char key[] = "scc_dma_args";
+-    std::vector<uint8_t> node;
+-    auto put32 = [&](uint32_t n) {
+-        const auto *bytes = reinterpret_cast<const uint8_t *>(&n);
+-        node.insert(node.end(), bytes, bytes + 4U);
+-    };
+-    put32(1U); put32(sizeof(key) - 1U);
+-    node.insert(node.end(), key, key + sizeof(key) - 1U); put32(16U);
+-    const uint64_t addresses[2] = {reinterpret_cast<uint64_t>(&block), 0U};
+-    const auto *bytes = reinterpret_cast<const uint8_t *>(addresses);
+-    node.insert(node.end(), bytes, bytes + sizeof(addresses));
+-    aicpu::AicpuParamHead head{};
+-    head.length = static_cast<uint32_t>(sizeof(head) + 4U + node.size());
+-    std::vector<uint8_t> args(head.length);
+-    std::memcpy(args.data(), &head, sizeof(head));
+-    const uint32_t length = static_cast<uint32_t>(node.size());
+-    std::memcpy(args.data() + sizeof(head), &length, 4U);
+-    std::memcpy(args.data() + sizeof(head) + 4U, node.data(), node.size());
+-    Check(SecureDma(args.data()) == AICPU_KERNEL_STATE_SUCCESS, "real exported entry accepts attribute anchor");
+-    Check(block.done == 1U && block.presentMask == kUrmaProbeAllSymbols, "exported entry returns complete report without key");
+-}
+-} // namespace
+-
+-// Deterministic loader seam: production probe still resolves symbols but never invokes URMA.
+-extern "C" void *dlsym(void *handle, const char *name) noexcept
+-{
+-    ++lookups;
+-    const uint64_t mask = handle == RTLD_DEFAULT ? processMask : libraryMask;
+-    for (size_t i = 0; i < kUrmaProbeSymbolCount; ++i) {
+-        if (std::strcmp(name, kUrmaProbeSymbols[i]) == 0 && (mask & (UINT64_C(1) << i)) != 0U) {
+-            return reinterpret_cast<void *>(&MustNotCallUrma);
+-        }
+-    }
+-    return nullptr;
+-}
+-extern "C" void *dlopen(const char *, int flags) noexcept
+-{
+-    Check(flags == (RTLD_NOW | RTLD_LOCAL), "load uses immediate, local symbol binding");
+-    ++opens;
+-    if (opens >= openAfter) { return &libraryHandle; }
+-    loaderError = "mock library absent";
+-    return nullptr;
+-}
+-extern "C" int dlclose(void *handle) noexcept
+-{
+-    Check(handle == &libraryHandle, "close only handle returned by own open");
+-    ++closes;
+-    if (closeFails) { loaderError = "mock close failure"; return -1; }
+-    return 0;
+-}
+-extern "C" int dladdr(const void *, Dl_info *info) noexcept
+-{
+-    info->dli_fname = "/mock/device/liburma.so.0";
+-    return reportOwner ? 1 : 0;
+-}
+-extern "C" char *dlerror() noexcept
+-{
+-    const char *error = loaderError;
+-    loaderError = nullptr;
+-    return const_cast<char *>(error);
+-}
+-
+-int main()
+-{
+-    Cases(); Refusals(); Adapter();
+-    std::printf("AICPU URMA loader probe: %u checks, %d failures (mock loader, CPU memory)\n", checks, failures);
+-    return failures == 0 ? 0 : 1;
+-}

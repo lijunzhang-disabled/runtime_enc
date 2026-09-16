@@ -139,7 +139,7 @@ Only after these checks pass should we add capture/replay and then secure-copy i
 
 ### Preparing the device SEND check
 
-The user selected **NPU logical ID 0** for the next probe. Its UB endpoint mapping is still unverified. The user confirmed that AICPU kernels are built by their online CI platform. Device-source changes belong in `AscendCCv2-AICPU/ms_kernels/`, with the source list and compile definitions in `ms_kernels/secure_dma_v2.cmake`; the platform build integrates these into `libaicpu_kernels.so` and packages the result. The local AICPU repository's top-level CMake builds Host tests only. Source preparation and local checks can proceed using this integration contract; the user will build the resulting device artifact through the existing CI flow and run it on the target. Runtime's `Dispatch` supports both platform dispatch by name and `SECURE_AICPU_SO_PATH` side loading, with built-in AICPU scheduler selection in both cases. Use the platform-dispatch mode already reported by the user.
+The user selected **NPU logical ID 0** for the next probe. Its UB endpoint mapping is still unverified. The user confirmed that AICPU kernels are built by their online CI platform. Device-source changes belong in `AscendCCv2-AICPU/ms_kernels/`, with the source list and compile definitions in `ms_kernels/secure_dma_v2.cmake`; the platform build integrates these into `libaicpu_kernels.so` and packages the result. The local AICPU repository's top-level CMake exposes only the device-source contract and creates no build targets. Source preparation and local checks can proceed using this integration contract; the user will build the resulting device artifact through the existing CI flow and run it on the target. Runtime's `Dispatch` supports both platform dispatch by name and `SECURE_AICPU_SO_PATH` side loading, with built-in AICPU scheduler selection in both cases. Use the platform-dispatch mode already reported by the user.
 
 To locate the current artifact, first inspect `SECURE_AICPU_SO_PATH` in the workload's launch environment. If unset, Runtime dispatches `SecureDma` by name; the Host installation may contain an AICPU archive instead of an unpacked `.so`. The inspected TSD package loader uses `ASCEND_AICPU_PATH` (default `/usr/local/Ascend/`) and an `opp/<package-title>/aicpu/` directory containing an `*aicpu_syskernels.tar.gz` package. Device-side extraction can use `/usr/lib64/aicpu_kernels/<uniqueVfId>/aicpu_kernels_device/` or another run-mode-specific path; that path need not be visible on the Host, and `uniqueVfId` must not be assumed to equal the NPU logical ID. These source-derived locations are search candidates until confirmed on the target.
 
@@ -199,6 +199,26 @@ source list includes `secure_dma_urma_probe.cc`. Its protocol header is shared d
 launcher. No Runtime source patch, new operator registration, or URMA development headers are required
 for this stage. CI must include the updated `secure_dma_device.cc`, source-list fragment, and all three
 new `secure_dma_urma_probe*` files from `ms_kernels/src/secure_dma/`.
+
+If CI reports `secure_dma_test_key_binding.cc` missing, sync the corrected
+`ms_kernels/secure_dma_v2.cmake`: it contains only device-source paths. The platform build should consume `SECURE_DMA_V2_SOURCES` and
+`SECURE_DMA_V2_DEFINES`, with no test-binding source appended. Keep the platform's own CMake file;
+the AICPU repository's root `CMakeLists.txt` only includes the device-source contract. It has no test
+targets, test options, or test-configuration includes. CI needs no `test/`, `stub/`, or `cmake/` files
+from this repository. The root configuration creates no build targets; device compilation remains
+in the platform build. This diagnostic needs no key provider;
+encrypted-copy runs still need their existing device key binding.
+
+The user's five copy commands (entry header, `secure_dma_v2.cmake`, the complete `src/secure_dma`
+directory, the two `secure_dma_kernels` files, and the JSON/INI registration files) were checked in
+an isolated platform tree. All eight source-list entries and project-local includes resolve.
+The platform still supplies its existing framework headers and include directories. The managed
+block should append only `${SECURE_DMA_V2_SOURCES}` for this probe; the extra
+`${CMAKE_CURRENT_SOURCE_DIR}/src/secure_dma_test_key_binding.cc` is not supplied by those copies.
+The corrected block and architecture condition are recorded in the
+[AICPU integration instructions](../../AscendCCv2-AICPU/README.md#dropping-it-into-the-platform).
+Both native and compiler-path AArch64 detection were checked at CMake generation time; this is not
+a completed platform build.
 
 After CI builds and you deploy the updated `libaicpu_kernels.so` package using your usual flow, start
 a fresh probe process with the reported settings:
@@ -280,22 +300,21 @@ python3 experiments/jfc_notify/tests/check_local.py
 ```
 
 Run this from the workspace with both source checkouts present. It needs a C++ compiler and OpenSSL
-development files, uses temporary build files, and never loads the installed driver. It checks the real
-device dispatcher and exported adapter with a mock loader, malformed requests, full/missing exports,
-optional loading and reference cleanup, and prevents any accidental call through a URMA symbol. It also
-runs the existing fixed, SmallCopy, missing-key, and legacy operator suites. The launcher is linked to a
+development files, uses temporary build files, and never loads the installed driver. It compiles the
+device sources in the Host configuration and runs the existing fixed, SmallCopy, missing-key, and
+legacy operator suites. The launcher is linked to a
 mock Runtime that validates the actual packed argument/protobuf bytes and simulates reports and failures,
 including synchronization failure with no explicit early release.
 
 These checks use CPU memory, portable Host fences, and the Host crypto backend. The production
 `SECURE_DMA_DEVICE_BUILD` and AArch64 barrier guard remain intact. They do not validate AICPU framework
-linking, real cache visibility, URMA provider initialization, or NPU behavior. The normal AICPU CMake also
-includes the new probe test for its supported AArch64 test environment.
+linking, real cache visibility, URMA provider initialization, or NPU behavior. The AICPU repository's
+`test/` directory retains its existing contents from `iter-007`.
 
 ## Local preparation findings
 
 The development workspace inspected on 2026-09-15 is x86_64, with no visible Ascend installation or NPU management tool. Local source inspection and script checks cannot provide a hardware result.
 
-The current AICPU repository's top-level CMake builds Host tests. Its `SecureDma` operator is integrated into the platform `libaicpu_kernels.so` through `ms_kernels/secure_dma_v2.cmake`. Some older Acceptance README instructions describe a separate custom-library load path, so those instructions must not be assumed to build the current official operator or provide its device URMA context.
+The current AICPU repository's top-level CMake exposes only the device-source contract and creates no build targets. Its `SecureDma` operator is integrated into the platform `libaicpu_kernels.so` through `ms_kernels/secure_dma_v2.cmake`. Some older Acceptance README instructions describe a separate custom-library load path, so those instructions must not be assumed to build the current official operator or provide its device URMA context.
 
 The notification design and full experiment stages are in [the design document](../../iter-007-jfc-completion-notification-design.md).

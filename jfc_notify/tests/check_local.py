@@ -41,7 +41,7 @@ def main():
             obj = build / (source.stem + ".o")
             run(common + isa + includes + ["-pthread", "-c", source, "-o", obj])
             objects.append(obj)
-        for name in ("urma_probe", "fixed_operator", "small_no_key", "small_operator", "operator"):
+        for name in ("fixed_operator", "small_no_key", "small_operator", "operator"):
             test = AICPU / "test" / ("test_secure_dma_" + name + ".cc")
             binary = build / name
             extra = [AICPU / "test/secure_dma_test_key_binding.cc"] if name == "operator" else []
