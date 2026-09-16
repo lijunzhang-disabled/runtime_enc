@@ -1,0 +1,500 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 825d7a3..ed265bb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -114,3 +114,11 @@ target_compile_options(secure_dma_fixed_operator_test PRIVATE -Wall -Wextra -Wfo
+ target_link_libraries(secure_dma_fixed_operator_test PRIVATE Threads::Threads)
+ add_test(NAME secure_dma_fixed_operator COMMAND secure_dma_fixed_operator_test)
+ set_tests_properties(secure_dma_fixed_operator PROPERTIES TIMEOUT 15)
++
++add_executable(secure_dma_urma_probe_test test/test_secure_dma_urma_probe.cc ${SECURE_DMA_V2_SOURCES})
++target_include_directories(secure_dma_urma_probe_test PRIVATE stub/aicpu_framework ms_kernels/inc ms_kernels/src)
++target_compile_definitions(secure_dma_urma_probe_test PRIVATE ${SECURE_DMA_V2_DEFINES})
++target_compile_options(secure_dma_urma_probe_test PRIVATE -Wall -Wextra -Wformat -Werror)
++target_link_libraries(secure_dma_urma_probe_test PRIVATE Threads::Threads)
++add_test(NAME secure_dma_urma_probe COMMAND secure_dma_urma_probe_test)
++set_tests_properties(secure_dma_urma_probe PROPERTIES TIMEOUT 10)
+diff --git a/README.md b/README.md
+index f3ccfb6..6a233cd 100644
+--- a/README.md
++++ b/README.md
+@@ -121,3 +121,22 @@ The fixed operator never polls. H2D compares the slot and descriptor nonce. D2H
+ Deploy the matching Runtime/AICPU iteration together. New AICPU retains legacy and SmallCopy dispatch; old AICPU does not recognize SDF1. The official source fragment includes `secure_dma_fixed_device.cc`, and the mirrored header is `secure_dma_fixed_protocol.h`.
+ 
+ The fixed suite calls the real exported entry: full slots beyond 64 KiB, tail lengths, repeated H2D/D2H, nonce carry/exhaustion, malformed inputs, absent key binding, Host abort, and page revocation immediately after terminal publication. These are local CPU tests; real STARS scheduling and Host/device DMA visibility require hardware validation. Details are in the [iter-007 report](https://github.com/aiyah-meloken/AscendCCv2-Runtime/blob/iter-007/docs/reports/secure-dma/iter-007.md).
++
++## iter-007-zlj AICPU URMA diagnostic
++
++`UMP1` is a separate, 640-byte diagnostic descriptor handled by the existing `SecureDma` entry.
++It reports availability of 27 URMA symbols in the AICPU process. The default only performs
++process-scope symbol lookup. An explicit request flag additionally permits loading standard URMA
++sonames; loading/closing may run constructors/destructors. The probe balances its own loader reference
++and never directly invokes URMA functions, creates queues, or changes the fixed-copy handshake.
++
++`ms_kernels/secure_dma_v2.cmake` includes `secure_dma_urma_probe.cc`. Include it and the accompanying
++headers when syncing this branch into the online CI platform build. The new code has no URMA header
++or mandatory URMA/libdl link dependency; absent weak loader functions produce a negative report.
++The host tests use a mock loader and verify routing, malformed requests, missing exports and reference
++cleanup, including invocation through the exported operator's attribute path without a key binding.
++
++The standalone Host launcher and CI/target instructions are in the workspace's
++`experiments/jfc_notify/README.md`. It dispatches by name on NPU 0, waits for native stream completion,
++and reads the report once. A successful symbol probe does not establish queue creation, endpoint
++routing, device SEND, or graph replay. Those remain separate experiments.
+diff --git a/ms_kernels/secure_dma_v2.cmake b/ms_kernels/secure_dma_v2.cmake
+index 716b7bb..690c173 100644
+--- a/ms_kernels/secure_dma_v2.cmake
++++ b/ms_kernels/secure_dma_v2.cmake
+@@ -9,6 +9,7 @@ set(SECURE_DMA_V2_SOURCES
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_device.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_small_device.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_fixed_device.cc"
++    "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_urma_probe.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_crypto.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr_bypass.cc")
+diff --git a/ms_kernels/src/secure_dma/secure_dma_device.cc b/ms_kernels/src/secure_dma/secure_dma_device.cc
+index 8f7732f..6784e77 100644
+--- a/ms_kernels/src/secure_dma/secure_dma_device.cc
++++ b/ms_kernels/src/secure_dma/secure_dma_device.cc
+@@ -16,6 +16,8 @@
+ #include "secure_dma/secure_dma_fixed_protocol.h"
+ #include "secure_dma/secure_dma_small_device.h"
+ #include "secure_dma/secure_dma_small_protocol.h"
++#include "secure_dma/secure_dma_urma_probe.h"
++#include "secure_dma/secure_dma_urma_probe_protocol.h"
+ 
+ /* The framework log. Every failure below explains itself here; see 820 7.2 for why not the return value. */
+ #include "kernel_log.h"
+@@ -333,6 +335,9 @@ std::int32_t RunDeviceSide(const std::uint64_t anchorAddr, const std::uint64_t t
+     if (magic == kFixedControlMagic) {
+         return RunFixedDeviceSide(anchorAddr, traceAddr);
+     }
++    if (magic == kUrmaProbeMagic) {
++        return RunUrmaProbe(anchorAddr);
++    }
+     if (magic == kSmallControlMagic || magic == kSmallChannelMagic) {
+         return RunSmallDeviceSide(anchorAddr, traceAddr);
+     }
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_probe.cc b/ms_kernels/src/secure_dma/secure_dma_urma_probe.cc
+new file mode 100644
+index 0000000..04fc158
+--- /dev/null
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_probe.cc
+@@ -0,0 +1,139 @@
++// Copyright (c) 2026 Huawei Technologies Co., Ltd.
++// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
++#include <dlfcn.h>
++
++#include "secure_dma/secure_dma_urma_probe.h"
++#include "secure_dma/secure_dma_urma_probe_protocol.h"
++#include "secure_dma/secure_dma_protocol.h"
++#include "secure_dma/secure_dma_barrier.h"
++
++// Avoid making libdl or liburma a new mandatory dependency of the platform kernel.
++// An older loader without these symbols produces a diagnostic report instead.
++#pragma weak dlopen
++#pragma weak dlsym
++#pragma weak dlerror
++#pragma weak dladdr
++#pragma weak dlclose
++
++namespace secure_dma {
++namespace {
++template <std::size_t N>
++void CopyText(char (&dest)[N], const char *text)
++{
++    std::size_t i = 0U;
++    if (text != nullptr) {
++        for (; i + 1U < N && text[i] != '\0'; ++i) { dest[i] = text[i]; }
++    }
++    dest[i] = '\0';
++}
++
++void LoaderError(UrmaProbeBlock &report, const char *fallback)
++{
++    const char *error = dlerror != nullptr ? dlerror() : nullptr;
++    CopyText(report.error, error != nullptr ? error : fallback);
++}
++
++void InspectSymbols(void *handle, UrmaProbeBlock &report)
++{
++    report.presentMask = 0U;
++    report.library[0] = '\0';
++    for (std::size_t i = 0U; i < kUrmaProbeSymbolCount; ++i) {
++        if (dlerror != nullptr) { (void)dlerror(); }
++        void *symbol = dlsym(handle, kUrmaProbeSymbols[i]);
++        const char *error = dlerror != nullptr ? dlerror() : nullptr;
++        if (symbol == nullptr || error != nullptr) { continue; }
++        report.presentMask |= UINT64_C(1) << i;
++        // Record one symbol owner; this is not a claim that all symbols have one owner.
++        if (report.library[0] == '\0' && dladdr != nullptr) {
++            Dl_info info{};
++            if (dladdr(symbol, &info) != 0 && info.dli_fname != nullptr) {
++                CopyText(report.library, info.dli_fname);
++            }
++        }
++    }
++}
++
++void Discover(const std::uint32_t flags, UrmaProbeBlock &report)
++{
++    if (dlsym == nullptr) {
++        report.status = static_cast<std::uint32_t>(UrmaProbeStatus::kLoaderUnavailable);
++        CopyText(report.error, "dlsym unavailable in this AICPU process");
++        return;
++    }
++    InspectSymbols(RTLD_DEFAULT, report);
++    if (report.presentMask != 0U) {
++        report.source = static_cast<std::uint32_t>(UrmaProbeSource::kProcess);
++    }
++    if (report.presentMask == kUrmaProbeAllSymbols) { return; }
++    report.status = static_cast<std::uint32_t>(report.presentMask == 0U ?
++        UrmaProbeStatus::kLibraryUnavailable : UrmaProbeStatus::kMissingSymbols);
++    if ((flags & kUrmaProbeAllowLoad) == 0U) {
++        CopyText(report.error, "process-scope lookup incomplete; explicit library loading was not requested");
++        return;
++    }
++    if (dlopen == nullptr || dlclose == nullptr) {
++        report.status = static_cast<std::uint32_t>(UrmaProbeStatus::kLoaderUnavailable);
++        CopyText(report.error, "dlopen/dlclose unavailable in this AICPU process");
++        return;
++    }
++    const char *const candidates[] = {"liburma.so.0", "liburma.so", "liburma.so.0.0.3"};
++    for (const char *name : candidates) {
++        if (dlerror != nullptr) { (void)dlerror(); }
++        void *handle = dlopen(name, RTLD_NOW | RTLD_LOCAL);
++        if (handle == nullptr) {
++            LoaderError(report, "cannot open URMA library");
++            continue;
++        }
++        report.source = static_cast<std::uint32_t>(UrmaProbeSource::kOpenedLibrary);
++        report.error[0] = '\0';
++        InspectSymbols(handle, report);
++        if (report.library[0] == '\0') { CopyText(report.library, name); }
++        report.status = static_cast<std::uint32_t>(report.presentMask == kUrmaProbeAllSymbols ?
++            UrmaProbeStatus::kSymbolsAvailable : UrmaProbeStatus::kMissingSymbols);
++        // Release only our own loader reference. Never uninitialize framework-owned URMA state.
++        if (dlclose(handle) != 0) {
++            report.status = static_cast<std::uint32_t>(UrmaProbeStatus::kCloseFailed);
++            LoaderError(report, "dlclose failed");
++        }
++        return;
++    }
++}
++} // namespace
++
++std::int32_t RunUrmaProbe(const std::uint64_t anchorAddr)
++{
++    if (anchorAddr == 0U || anchorAddr % alignof(UrmaProbeBlock) != 0U ||
++        anchorAddr > static_cast<std::uint64_t>(UINTPTR_MAX) - (sizeof(UrmaProbeBlock) - 1U)) {
++        return kStatusBadArgs;
++    }
++    auto *block = reinterpret_cast<UrmaProbeBlock *>(static_cast<std::uintptr_t>(anchorAddr));
++    if (block->magic != kUrmaProbeMagic || block->version != kUrmaProbeVersion ||
++        block->bytes != sizeof(UrmaProbeBlock) || (block->flags & ~kUrmaProbeAllowLoad) != 0U ||
++        block->cookie == 0U) {
++        return kStatusBadArgs;
++    }
++    for (std::uint64_t value : block->reserved) {
++        if (value != 0U) { return kStatusBadArgs; }
++    }
++    const std::uint32_t flags = block->flags;
++    UrmaProbeBlock report{};
++    report.echoedCookie = block->cookie;
++    report.symbolCount = static_cast<std::uint32_t>(kUrmaProbeSymbolCount);
++#if defined(__aarch64__)
++    report.architecture = 1U;
++#elif defined(__x86_64__)
++    report.architecture = 2U;
++#endif
++    Discover(flags, report);
++    const auto *src = reinterpret_cast<const std::uint8_t *>(&report);
++    auto *dst = reinterpret_cast<std::uint8_t *>(block);
++    for (std::size_t i = offsetof(UrmaProbeBlock, status); i < sizeof(UrmaProbeBlock); ++i) {
++        dst[i] = src[i];
++    }
++    PublishWord(&block->done, 1U); // Last request-memory access; host still waits for native completion.
++    return kStatusOk; // The report carries a negative capability result without failing the native task.
++}
++} // namespace secure_dma
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_probe.h b/ms_kernels/src/secure_dma/secure_dma_urma_probe.h
+new file mode 100644
+index 0000000..fd12551
+--- /dev/null
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_probe.h
+@@ -0,0 +1,11 @@
++// Copyright (c) 2026 Huawei Technologies Co., Ltd.
++// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
++#ifndef SECURE_DMA_URMA_PROBE_H
++#define SECURE_DMA_URMA_PROBE_H
++#include <cstdint>
++
++namespace secure_dma {
++// Only loader/symbol discovery. Does not invoke URMA APIs or create transport resources.
++std::int32_t RunUrmaProbe(std::uint64_t anchorAddr);
++} // namespace secure_dma
++#endif
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h b/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h
+new file mode 100644
+index 0000000..eb33431
+--- /dev/null
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h
+@@ -0,0 +1,58 @@
++// Copyright (c) 2026 Huawei Technologies Co., Ltd.
++// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
++#ifndef SECURE_DMA_URMA_PROBE_PROTOCOL_H
++#define SECURE_DMA_URMA_PROBE_PROTOCOL_H
++
++#include <cstddef>
++#include <cstdint>
++
++namespace secure_dma {
++constexpr std::uint32_t kUrmaProbeMagic = 0x31504D55U; // UMP1, a diagnostic, never a copy descriptor.
++constexpr std::uint32_t kUrmaProbeVersion = 1U;
++constexpr std::uint32_t kUrmaProbeAllowLoad = 1U;
++enum class UrmaProbeStatus : std::uint32_t {
++    kSymbolsAvailable = 0U,
++    kLoaderUnavailable = 1U,
++    kLibraryUnavailable = 2U,
++    kMissingSymbols = 3U,
++    kCloseFailed = 4U,
++};
++enum class UrmaProbeSource : std::uint32_t { kNone = 0U, kProcess = 1U, kOpenedLibrary = 2U };
++
++constexpr const char *kUrmaProbeSymbols[] = {
++    "urma_init", "urma_uninit", "urma_get_device_list", "urma_free_device_list",
++    "urma_get_eid_list", "urma_free_eid_list", "urma_create_context", "urma_delete_context",
++    "urma_create_jfce", "urma_delete_jfce", "urma_create_jfc", "urma_delete_jfc",
++    "urma_create_jfr", "urma_delete_jfr", "urma_create_jfs", "urma_delete_jfs",
++    "urma_register_seg", "urma_unregister_seg", "urma_import_jfr", "urma_unimport_jfr",
++    "urma_post_jfr_wr", "urma_post_jfs_wr", "urma_poll_jfc", "urma_wait_jfc",
++    "urma_ack_jfc", "urma_rearm_jfc", "urma_query_device",
++};
++constexpr std::size_t kUrmaProbeSymbolCount = sizeof(kUrmaProbeSymbols) / sizeof(kUrmaProbeSymbols[0]);
++constexpr std::uint64_t kUrmaProbeAllSymbols = (UINT64_C(1) << kUrmaProbeSymbolCount) - 1U;
++static_assert(kUrmaProbeSymbolCount < 64U, "symbol mask fits on the wire");
++
++struct alignas(64) UrmaProbeBlock {
++    std::uint32_t magic;
++    std::uint32_t version;
++    std::uint32_t bytes;
++    std::uint32_t flags;
++    std::uint64_t cookie;
++    std::uint64_t reserved[5];
++    // Output. Read only after native stream synchronization, never through a polling DMA loop.
++    std::uint32_t status;
++    std::uint32_t source;
++    std::uint32_t symbolCount;
++    std::uint32_t architecture; // 1 = AArch64, 2 = x86_64 (local tests), 0 = other.
++    std::uint64_t presentMask;
++    std::uint64_t echoedCookie;
++    char library[256];
++    char error[256];
++    std::uint32_t done;
++    std::uint32_t reservedOutput[7];
++};
++static_assert(sizeof(UrmaProbeBlock) == 640U, "fixed diagnostic wire size");
++static_assert(offsetof(UrmaProbeBlock, status) == 64U, "separate request and report");
++static_assert(offsetof(UrmaProbeBlock, done) == 608U, "fixed completion offset");
++} // namespace secure_dma
++#endif
+diff --git a/test/test_secure_dma_urma_probe.cc b/test/test_secure_dma_urma_probe.cc
+new file mode 100644
+index 0000000..8d86a65
+--- /dev/null
++++ b/test/test_secure_dma_urma_probe.cc
+@@ -0,0 +1,190 @@
++// Copyright (c) 2026 Huawei Technologies Co., Ltd.
++// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <vector>
++
++#include "kernel_base.h"
++#include "secure_dma.h"
++#include "secure_dma/secure_dma_device.h"
++#include "secure_dma/secure_dma_protocol.h"
++#include "secure_dma/secure_dma_urma_probe.h"
++#include "secure_dma/secure_dma_urma_probe_protocol.h"
++
++namespace {
++using namespace secure_dma;
++int failures = 0;
++unsigned checks = 0;
++uint64_t processMask = 0U;
++uint64_t libraryMask = 0U;
++unsigned opens = 0U, closes = 0U, lookups = 0U;
++unsigned openAfter = 1U;
++bool closeFails = false;
++bool reportOwner = true;
++int libraryHandle;
++const char *loaderError = nullptr;
++
++void Check(bool ok, const char *message)
++{
++    ++checks;
++    if (!ok) { ++failures; std::printf("FAIL %s\n", message); }
++}
++
++// Any accidental call through a discovered URMA symbol fails the test immediately.
++void MustNotCallUrma() { std::abort(); }
++
++UrmaProbeBlock Request()
++{
++    opens = closes = lookups = 0U;
++    processMask = libraryMask = 0U;
++    openAfter = 1U;
++    closeFails = false;
++    reportOwner = true;
++    loaderError = nullptr;
++    UrmaProbeBlock block{};
++    block.magic = kUrmaProbeMagic;
++    block.version = kUrmaProbeVersion;
++    block.bytes = sizeof(block);
++    block.cookie = UINT64_C(0x1122334455667788);
++    block.status = UINT32_MAX;
++    return block;
++}
++
++void Expect(UrmaProbeBlock &block, UrmaProbeStatus status, UrmaProbeSource source, uint64_t mask,
++            unsigned wantOpens, unsigned wantCloses)
++{
++    const auto before = block;
++    Check(RunDeviceSide(reinterpret_cast<uint64_t>(&block), 0U) == kStatusOk, "real dispatcher accepts probe");
++    Check(std::memcmp(&before, &block, offsetof(UrmaProbeBlock, status)) == 0, "request prefix preserved");
++    Check(block.status == static_cast<uint32_t>(status), "capability status");
++    Check(block.source == static_cast<uint32_t>(source), "symbol source");
++    Check(block.presentMask == mask && block.symbolCount == kUrmaProbeSymbolCount, "exact symbol mask");
++    Check(block.done == 1U && block.echoedCookie == before.cookie, "completion and cookie");
++    Check(opens == wantOpens && closes == wantCloses, "only owned loader references released");
++    Check(block.library[255] == '\0' && block.error[255] == '\0', "bounded report strings");
++}
++
++void Cases()
++{
++    auto block = Request();
++    Expect(block, UrmaProbeStatus::kLibraryUnavailable, UrmaProbeSource::kNone, 0U, 0U, 0U);
++    block = Request(); processMask = kUrmaProbeAllSymbols;
++    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kProcess, processMask, 0U, 0U);
++    block = Request(); processMask = kUrmaProbeAllSymbols & ~(UINT64_C(1) << 22U);
++    Expect(block, UrmaProbeStatus::kMissingSymbols, UrmaProbeSource::kProcess, processMask, 0U, 0U);
++    block = Request(); block.flags = kUrmaProbeAllowLoad; libraryMask = kUrmaProbeAllSymbols;
++    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kOpenedLibrary, libraryMask, 1U, 1U);
++    block = Request(); block.flags = kUrmaProbeAllowLoad; libraryMask = 5U;
++    Expect(block, UrmaProbeStatus::kMissingSymbols, UrmaProbeSource::kOpenedLibrary, 5U, 1U, 1U);
++    block = Request(); block.flags = kUrmaProbeAllowLoad; openAfter = 4U;
++    Expect(block, UrmaProbeStatus::kLibraryUnavailable, UrmaProbeSource::kNone, 0U, 3U, 0U);
++    Check(std::strcmp(block.error, "mock library absent") == 0, "loader error preserved");
++    block = Request(); block.flags = kUrmaProbeAllowLoad; openAfter = 3U;
++    libraryMask = kUrmaProbeAllSymbols; reportOwner = false;
++    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kOpenedLibrary, libraryMask, 3U, 1U);
++    Check(std::strcmp(block.library, "liburma.so.0.0.3") == 0, "soname fallback without dladdr owner");
++    block = Request(); block.flags = kUrmaProbeAllowLoad; closeFails = true;
++    libraryMask = kUrmaProbeAllSymbols;
++    Expect(block, UrmaProbeStatus::kCloseFailed, UrmaProbeSource::kOpenedLibrary, libraryMask, 1U, 1U);
++    block = Request(); block.flags = kUrmaProbeAllowLoad; processMask = kUrmaProbeAllSymbols;
++    Expect(block, UrmaProbeStatus::kSymbolsAvailable, UrmaProbeSource::kProcess, processMask, 0U, 0U);
++    block = Request(); block.flags = kUrmaProbeAllowLoad; processMask = 2U; openAfter = 4U;
++    Expect(block, UrmaProbeStatus::kMissingSymbols, UrmaProbeSource::kProcess, 2U, 3U, 0U);
++}
++
++void Refusals()
++{
++    for (unsigned scenario = 0; scenario < 10; ++scenario) {
++        auto block = Request();
++        switch (scenario) {
++            case 0: ++block.magic; break;
++            case 1: ++block.version; break;
++            case 2: --block.bytes; break;
++            case 3: block.flags = 2U; break;
++            case 4: block.cookie = 0U; break;
++            default: block.reserved[scenario - 5U] = 1U; break;
++        }
++        const auto before = block;
++        Check(RunUrmaProbe(reinterpret_cast<uint64_t>(&block)) == kStatusBadArgs, "invalid request refused");
++        Check(std::memcmp(&block, &before, sizeof(block)) == 0, "refusal leaves request unchanged");
++        Check(lookups == 0U && opens == 0U, "invalid request cannot trigger loader");
++    }
++    Check(RunUrmaProbe(0) == kStatusBadArgs, "null anchor refused");
++    Check(RunUrmaProbe(65) == kStatusBadArgs, "misaligned anchor refused before access");
++    Check(RunUrmaProbe(UINT64_MAX - 63U) == kStatusBadArgs, "overflow refused before access");
++}
++
++void Adapter()
++{
++    auto block = Request(); processMask = kUrmaProbeAllSymbols;
++    // Use the framework stub's documented encoding, not the real protobuf wire format.
++    const char key[] = "scc_dma_args";
++    std::vector<uint8_t> node;
++    auto put32 = [&](uint32_t n) {
++        const auto *bytes = reinterpret_cast<const uint8_t *>(&n);
++        node.insert(node.end(), bytes, bytes + 4U);
++    };
++    put32(1U); put32(sizeof(key) - 1U);
++    node.insert(node.end(), key, key + sizeof(key) - 1U); put32(16U);
++    const uint64_t addresses[2] = {reinterpret_cast<uint64_t>(&block), 0U};
++    const auto *bytes = reinterpret_cast<const uint8_t *>(addresses);
++    node.insert(node.end(), bytes, bytes + sizeof(addresses));
++    aicpu::AicpuParamHead head{};
++    head.length = static_cast<uint32_t>(sizeof(head) + 4U + node.size());
++    std::vector<uint8_t> args(head.length);
++    std::memcpy(args.data(), &head, sizeof(head));
++    const uint32_t length = static_cast<uint32_t>(node.size());
++    std::memcpy(args.data() + sizeof(head), &length, 4U);
++    std::memcpy(args.data() + sizeof(head) + 4U, node.data(), node.size());
++    Check(SecureDma(args.data()) == AICPU_KERNEL_STATE_SUCCESS, "real exported entry accepts attribute anchor");
++    Check(block.done == 1U && block.presentMask == kUrmaProbeAllSymbols, "exported entry returns complete report without key");
++}
++} // namespace
++
++// Deterministic loader seam: production probe still resolves symbols but never invokes URMA.
++extern "C" void *dlsym(void *handle, const char *name) noexcept
++{
++    ++lookups;
++    const uint64_t mask = handle == RTLD_DEFAULT ? processMask : libraryMask;
++    for (size_t i = 0; i < kUrmaProbeSymbolCount; ++i) {
++        if (std::strcmp(name, kUrmaProbeSymbols[i]) == 0 && (mask & (UINT64_C(1) << i)) != 0U) {
++            return reinterpret_cast<void *>(&MustNotCallUrma);
++        }
++    }
++    return nullptr;
++}
++extern "C" void *dlopen(const char *, int flags) noexcept
++{
++    Check(flags == (RTLD_NOW | RTLD_LOCAL), "load uses immediate, local symbol binding");
++    ++opens;
++    if (opens >= openAfter) { return &libraryHandle; }
++    loaderError = "mock library absent";
++    return nullptr;
++}
++extern "C" int dlclose(void *handle) noexcept
++{
++    Check(handle == &libraryHandle, "close only handle returned by own open");
++    ++closes;
++    if (closeFails) { loaderError = "mock close failure"; return -1; }
++    return 0;
++}
++extern "C" int dladdr(const void *, Dl_info *info) noexcept
++{
++    info->dli_fname = "/mock/device/liburma.so.0";
++    return reportOwner ? 1 : 0;
++}
++extern "C" char *dlerror() noexcept
++{
++    const char *error = loaderError;
++    loaderError = nullptr;
++    return const_cast<char *>(error);
++}
++
++int main()
++{
++    Cases(); Refusals(); Adapter();
++    std::printf("AICPU URMA loader probe: %u checks, %d failures (mock loader, CPU memory)\n", checks, failures);
++    return failures == 0 ? 0 : 1;
++}

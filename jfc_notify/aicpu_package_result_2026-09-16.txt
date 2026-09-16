@@ -1,0 +1,20 @@
+probe=aicpu_package_inspection version=1
+SECURE_AICPU_SO_PATH=<unset>
+ASCEND_AICPU_PATH=/home/zlj/cann/cann-9.1.T560
+package_root_resolved=/home/zlj/cann/cann-9.1.T560
+package=/home/zlj/cann/cann-9.1.T560/opp/Ascend/aicpu/Ascend-aicpu_syskernels.tar.gz
+  resolved=/home/zlj/cann/cann-9.1.T560/opp/Ascend/aicpu/Ascend-aicpu_syskernels.tar.gz size=61524994
+  format=gzip payload_offset=8448 signature_verification=NOT_TESTED
+  library_member=aicpu_kernels_device/libaicpu_kernels.so bytes=8448152
+  machine=AArch64 SecureDma=EXPORTED
+  needed=libaicpu_sharder.so,libascend_hal.so,libc_sec.so,libstdc++.so.6,libm.so.6,libgcc_s.so.1,libc.so.6,ld-linux-aarch64.so.1 omitted=0
+  version_member=aicpu_kernels_device/version.info
+  version=Version=9.1.T6.0.B060 | timestamp=20260628_004128461 | Name=Ascend-aicpu_syskernels.tar.gz | SandBoxSo=libtensorflow.so
+  library_members=1 elf_inspections_attempted=1 omitted=0 scan=COMPLETE
+package=/home/zlj/cann/cann-9.1.T560/opp/Ascend/aicpu/Ascend-aicpu_extend_syskernels.tar.gz
+  resolved=/home/zlj/cann/cann-9.1.T560/opp/Ascend/aicpu/Ascend-aicpu_extend_syskernels.tar.gz size=30489266
+  format=gzip payload_offset=8448 signature_verification=NOT_TESTED
+  version_member=aicpu_extend_syskernels/version.info
+  version=Version=9.1.T6.0.B060 | timestamp=20260628_004128461
+  library_members=0 elf_inspections_attempted=0 omitted=0 scan=COMPLETE
+scope=static_package_inspection deployed_binary=UNCONFIRMED device_urma=NOT_TESTED
