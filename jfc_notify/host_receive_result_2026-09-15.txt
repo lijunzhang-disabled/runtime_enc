@@ -1,0 +1,24 @@
+probe=host_receive_resources version=2 mode=resources
+loaded_urma=/usr/lib64/liburma.so.0.0.3
+step=urma_init OK
+step=get_device_list OK
+device_count=10
+step=get_eid_list OK
+selected_device=udmac0d1e2 eid_index=0 eid=00000000003f020000100000df080b00
+step=query_device OK
+capabilities trans_mode=0x7 max_jfc_depth=1048576 max_jfr_depth=32768 max_jfr_sge=4
+step=create_context OK
+step=create_jfce OK
+step=create_jfc OK
+step=create_jfr OK
+step=register_seg OK
+step=post_jfr_wr OK
+receive_posted=1 buffer_bytes=64 queue_depth=16
+step=poll_jfc OK completions=0 (expected_without_sender)
+step=delete_jfr OK
+step=unregister_seg OK
+step=delete_jfc OK
+step=delete_jfce OK
+step=delete_context OK
+step=urma_uninit OK
+RESULT host_receive_resources=PASS device_send=NOT_TESTED graph_replay=NOT_TESTED
