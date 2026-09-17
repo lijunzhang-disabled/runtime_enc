@@ -1,0 +1,538 @@
+diff --git a/README.md b/README.md
+index 14ca84d..7e68f99 100644
+--- a/README.md
++++ b/README.md
+@@ -153,9 +153,25 @@ process-scope symbol lookup. An explicit request flag additionally permits loadi
+ sonames; loading/closing may run constructors/destructors. The probe balances its own loader reference
+ and never directly invokes URMA functions, creates queues, or changes the fixed-copy handshake.
+ 
+-`ms_kernels/secure_dma_v2.cmake` includes `secure_dma_urma_probe.cc`. Include it and the accompanying
+-headers when syncing this branch into the online CI platform build. The new code has no URMA header
+-or mandatory URMA/libdl link dependency; absent weak loader functions produce a negative report.
++The symbol probe passed on NPU 0 on 2026-09-17. The next experiment adds a separate 3968-byte `UMP2`
++descriptor: `--list` enumerates URMA devices/EIDs inside that AICPU process; `--resources` selects an
++explicit local device/EID, creates a context, JFCE, depth-16 JFC and RM JFS, polls once expecting zero,
++then deletes its resources in reverse dependency order. It resolves all cleanup functions before
++allocating. A failed deletion stops parent releases and reports retained resources. No work request
++is posted. These modes use existing process state without calling `urma_init`, `urma_uninit`, or
++`dlopen`; an enumeration failure is reported without changing global initialization.
++
++`ms_kernels/secure_dma_v2.cmake` now lists nine sources, including `secure_dma_urma_probe.cc` and
++`secure_dma_urma_resource_probe.cc`. Both and their headers are inside the existing recursive
++`ms_kernels/src/secure_dma` copy. The five existing copy commands and managed platform CMake block
++still suffice; no test files or dependencies were added. Rebuild through online CI and install the
++new package before requesting `UMP2`; the earlier symbol-only package cannot execute it.
++
++Device compilation has no URMA SDK-header or mandatory URMA/libdl link dependency. The resource
++probe uses a narrow LP64 ABI declaration derived from the reference driver/HCOMM headers. The Host
++builder checks its layouts against installed URMA headers before enabling the new modes. That check
++does not establish the ABI of the separately deployed AICPU library; target execution is pending.
++Absent weak loader functions produce a negative report.
+ The standalone Host launcher, local checks, and CI/target instructions are in the workspace's
+ `experiments/jfc_notify/README.md`. It dispatches by name on NPU 0, waits for native stream completion,
+ and reads the report once. A successful symbol probe does not establish queue creation, endpoint
+diff --git a/ms_kernels/secure_dma_v2.cmake b/ms_kernels/secure_dma_v2.cmake
+index 8470ebc..f97d99a 100644
+--- a/ms_kernels/secure_dma_v2.cmake
++++ b/ms_kernels/secure_dma_v2.cmake
+@@ -10,6 +10,7 @@ set(SECURE_DMA_V2_SOURCES
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_small_device.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_fixed_device.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_urma_probe.cc"
++    "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_urma_resource_probe.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_crypto.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr.cc"
+     "${CMAKE_CURRENT_LIST_DIR}/src/secure_dma/secure_dma_aes_ctr_bypass.cc")
+diff --git a/ms_kernels/src/secure_dma/secure_dma_device.cc b/ms_kernels/src/secure_dma/secure_dma_device.cc
+index 6784e77..8e2a3a6 100644
+--- a/ms_kernels/src/secure_dma/secure_dma_device.cc
++++ b/ms_kernels/src/secure_dma/secure_dma_device.cc
+@@ -338,6 +338,9 @@ std::int32_t RunDeviceSide(const std::uint64_t anchorAddr, const std::uint64_t t
+     if (magic == kUrmaProbeMagic) {
+         return RunUrmaProbe(anchorAddr);
+     }
++    if (magic == kUrmaResourceMagic) {
++        return RunUrmaResourceProbe(anchorAddr);
++    }
+     if (magic == kSmallControlMagic || magic == kSmallChannelMagic) {
+         return RunSmallDeviceSide(anchorAddr, traceAddr);
+     }
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_probe.h b/ms_kernels/src/secure_dma/secure_dma_urma_probe.h
+index fd12551..12a481c 100644
+--- a/ms_kernels/src/secure_dma/secure_dma_urma_probe.h
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_probe.h
+@@ -7,5 +7,7 @@
+ namespace secure_dma {
+ // Only loader/symbol discovery. Does not invoke URMA APIs or create transport resources.
+ std::int32_t RunUrmaProbe(std::uint64_t anchorAddr);
++// Uses existing process URMA state; owns and tears down only its diagnostic resources.
++std::int32_t RunUrmaResourceProbe(std::uint64_t anchorAddr);
+ } // namespace secure_dma
+ #endif
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_probe_abi.h b/ms_kernels/src/secure_dma/secure_dma_urma_probe_abi.h
+new file mode 100644
+index 0000000..d6a811e
+--- /dev/null
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_probe_abi.h
+@@ -0,0 +1,59 @@
++// Copyright (c) 2026 Huawei Technologies Co., Ltd.
++// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
++#ifndef SECURE_DMA_URMA_PROBE_ABI_H
++#define SECURE_DMA_URMA_PROBE_ABI_H
++
++#include <cstddef>
++#include <cstdint>
++
++// Narrow LP64 URMA API 0.9 layout used by the resource diagnostic. Source reference:
++// driver/src/custom/network/inc/ascend950/urma/urma_types.h (2026) and the matching
++// hcomm .../external_depends/ubengine/urma_api.h. The Host build checks these layouts
++// against its installed URMA headers before a resource request can be submitted.
++// This does not establish the ABI/version of the separately loaded device library.
++// Keep provider objects opaque; only the public device name/type prefix is read.
++namespace secure_dma { namespace urma_probe_abi {
++struct Device;
++struct Context;
++struct Jfce;
++struct Jfc;
++struct Jfs;
++
++constexpr std::size_t kNameBytes = 64U;
++constexpr std::size_t kDeviceNameOffset = 0U;
++constexpr std::size_t kDeviceTypeOffset = 64U + 4096U;
++constexpr std::int32_t kTransportUb = 0;
++constexpr std::int32_t kReliableMessage = 1;
++
++struct alignas(8) Eid { std::uint8_t raw[16]; };
++struct EidInfo { Eid eid; std::uint32_t index; };
++struct JfcConfig {
++    std::uint32_t depth;
++    std::uint32_t flags;
++    std::uint32_t ceqn;
++    Jfce *event;
++    std::uint64_t userContext;
++};
++struct JfsConfig {
++    std::uint32_t depth;
++    std::uint32_t flags;
++    std::int32_t mode;
++    std::uint8_t priority;
++    std::uint8_t maxSge;
++    std::uint8_t maxRemoteSge;
++    std::uint32_t maxInline;
++    std::uint8_t rnrRetry;
++    std::uint8_t errorTimeout;
++    Jfc *completion;
++    std::uint64_t userContext;
++};
++// Only an empty poll is tested. Do not interpret these bytes as a received record.
++struct alignas(8) Completion { std::uint8_t bytes[80]; };
++
++constexpr std::uint64_t kLayoutTag = UINT64_C(0x554d444b00090001);
++static_assert(sizeof(void *) == 8U, "resource probe requires an LP64 build");
++static_assert(sizeof(EidInfo) == 24U && offsetof(EidInfo, index) == 16U, "URMA EID layout");
++static_assert(sizeof(JfcConfig) == 32U && offsetof(JfcConfig, event) == 16U, "URMA JFC config layout");
++static_assert(sizeof(JfsConfig) == 40U && offsetof(JfsConfig, completion) == 24U, "URMA JFS config layout");
++} } // namespace secure_dma::urma_probe_abi
++#endif
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h b/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h
+index eb33431..1f56b4c 100644
+--- a/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h
+@@ -54,5 +54,77 @@ struct alignas(64) UrmaProbeBlock {
+ static_assert(sizeof(UrmaProbeBlock) == 640U, "fixed diagnostic wire size");
+ static_assert(offsetof(UrmaProbeBlock, status) == 64U, "separate request and report");
+ static_assert(offsetof(UrmaProbeBlock, done) == 608U, "fixed completion offset");
++
++// Separate magic/layout: the successful version-1 symbol probe remains compatible.
++constexpr std::uint32_t kUrmaResourceMagic = 0x32504D55U; // UMP2
++constexpr std::uint32_t kUrmaResourceVersion = 2U;
++constexpr std::uint32_t kUrmaResourceDepth = 16U;
++constexpr std::uint32_t kUrmaEndpointLimit = 32U;
++enum class UrmaResourceMode : std::uint32_t { kList = 1U, kResources = 2U };
++enum class UrmaResourceStatus : std::uint32_t {
++    kOk = 0U, kMissingSymbols, kNoDevices, kEnumerationFailed, kSelectionNotFound,
++    kApiFailed, kCleanupFailed, kMalformedApiResult, kUnexpectedCompletion,
++};
++enum class UrmaResourceStep : std::uint32_t {
++    kResolve = 0U, kGetDevices, kGetEids, kSelect, kCreateContext, kCreateJfce,
++    kCreateJfc, kCreateJfs, kPoll, kDeleteJfs, kDeleteJfc, kDeleteJfce, kDeleteContext, kCount,
++};
++constexpr const char *kUrmaResourceStepNames[] = {
++    "resolve_resource_api", "get_device_list", "get_eid_list", "select_endpoint",
++    "create_context", "create_jfce", "create_jfc", "create_jfs", "poll_jfc",
++    "delete_jfs", "delete_jfc", "delete_jfce", "delete_context",
++};
++constexpr std::size_t kUrmaResourceStepCount = static_cast<std::size_t>(UrmaResourceStep::kCount);
++static_assert(sizeof(kUrmaResourceStepNames) / sizeof(kUrmaResourceStepNames[0]) == kUrmaResourceStepCount,
++              "resource step names match wire indices");
++struct UrmaEndpoint {
++    char name[64];
++    std::uint8_t eid[16];
++    std::uint32_t eidIndex;
++    std::int32_t transport;
++    std::uint32_t deviceOrdinal;
++    std::uint32_t reserved;
++};
++struct UrmaResourceStepResult {
++    std::int32_t result;
++    std::int32_t systemError;
++    std::uint32_t state; // 0 = not attempted, 1 = success, 2 = failure
++    std::uint32_t reserved;
++};
++struct alignas(64) UrmaResourceBlock {
++    // Input. Host validates this prefix is preserved by the native task.
++    std::uint32_t magic;
++    std::uint32_t version;
++    std::uint32_t bytes;
++    std::uint32_t mode;
++    std::uint64_t cookie;
++    std::uint64_t abiTag;
++    char deviceName[64];
++    std::uint32_t eidIndex;
++    std::uint32_t queueDepth;
++    std::uint32_t reserved[6];
++    // Output. No pointers or queue identifiers are exported for reuse after this task.
++    std::uint32_t status;
++    std::uint32_t architecture;
++    std::uint32_t deviceCount;
++    std::uint32_t endpointCount;
++    std::uint32_t reportedCount;
++    std::uint32_t cleanupRetained;
++    std::uint32_t initPolicy; // 1 = existing process state, no init/uninit calls
++    std::uint32_t reservedReport;
++    std::uint64_t echoedCookie;
++    std::uint64_t presentMask;
++    char library[256];
++    char detail[128];
++    UrmaEndpoint selected;
++    UrmaResourceStepResult steps[kUrmaResourceStepCount];
++    UrmaEndpoint endpoints[kUrmaEndpointLimit];
++    std::uint32_t done;
++    std::uint32_t reservedOutput[7];
++};
++static_assert(sizeof(UrmaEndpoint) == 96U, "endpoint wire layout");
++static_assert(sizeof(UrmaResourceBlock) == 3968U, "resource diagnostic wire layout");
++static_assert(offsetof(UrmaResourceBlock, status) == 128U, "resource request prefix");
++static_assert(offsetof(UrmaResourceBlock, done) == 3936U, "resource completion offset");
+ } // namespace secure_dma
+ #endif
+diff --git a/ms_kernels/src/secure_dma/secure_dma_urma_resource_probe.cc b/ms_kernels/src/secure_dma/secure_dma_urma_resource_probe.cc
+new file mode 100644
+index 0000000..2c52987
+--- /dev/null
++++ b/ms_kernels/src/secure_dma/secure_dma_urma_resource_probe.cc
+@@ -0,0 +1,314 @@
++// Copyright (c) 2026 Huawei Technologies Co., Ltd.
++// Licensed under CANN Open Software License Agreement Version 2.0; see LICENSE.
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
++#include <dlfcn.h>
++#include <cerrno>
++#include <cstring>
++
++#include "secure_dma/secure_dma_urma_probe.h"
++#include "secure_dma/secure_dma_urma_probe_abi.h"
++#include "secure_dma/secure_dma_urma_probe_protocol.h"
++#include "secure_dma/secure_dma_protocol.h"
++#include "secure_dma/secure_dma_barrier.h"
++
++#pragma weak dlsym
++#pragma weak dlerror
++#pragma weak dladdr
++
++namespace secure_dma {
++namespace {
++namespace abi = urma_probe_abi;
++constexpr int kDeviceLimit = 64;
++constexpr std::uint32_t kEidLimit = 1024U;
++
++template <std::size_t N>
++void Text(char (&out)[N], const char *in)
++{
++    std::size_t i = 0U;
++    if (in != nullptr) { for (; i + 1U < N && in[i] != '\0'; ++i) { out[i] = in[i]; } }
++    out[i] = '\0';
++}
++
++bool NameChar(const char c)
++{
++    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
++        c == '_' || c == '-' || c == '.';
++}
++
++bool ReadName(char (&out)[64], const char *name, bool allowEmpty = false)
++{
++    for (std::size_t i = 0; i < sizeof(out); ++i) {
++        if (name[i] == '\0') { out[i] = '\0'; return i != 0U || allowEmpty; }
++        if (!NameChar(name[i])) { return false; }
++        out[i] = name[i];
++    }
++    return false;
++}
++
++void Mark(UrmaResourceBlock &report, UrmaResourceStep step, bool ok, std::int32_t result, int error)
++{
++    auto &record = report.steps[static_cast<std::size_t>(step)];
++    record.result = result;
++    record.systemError = error;
++    record.state = ok ? 1U : 2U;
++}
++
++void Fail(UrmaResourceBlock &report, UrmaResourceStatus status, const char *detail)
++{
++    report.status = static_cast<std::uint32_t>(status);
++    Text(report.detail, detail);
++}
++
++struct Api {
++    abi::Device **(*getDevices)(int *);
++    void (*freeDevices)(abi::Device **);
++    abi::EidInfo *(*getEids)(abi::Device *, std::uint32_t *);
++    void (*freeEids)(abi::EidInfo *);
++    abi::Context *(*createContext)(abi::Device *, std::uint32_t);
++    std::int32_t (*deleteContext)(abi::Context *);
++    abi::Jfce *(*createJfce)(abi::Context *);
++    std::int32_t (*deleteJfce)(abi::Jfce *);
++    abi::Jfc *(*createJfc)(abi::Context *, abi::JfcConfig *);
++    std::int32_t (*deleteJfc)(abi::Jfc *);
++    abi::Jfs *(*createJfs)(abi::Context *, abi::JfsConfig *);
++    std::int32_t (*deleteJfs)(abi::Jfs *);
++    int (*poll)(abi::Jfc *, int, abi::Completion *);
++};
++
++template <typename Function>
++bool Load(Function &function, const char *name, unsigned index, UrmaResourceBlock &report)
++{
++    if (dlerror != nullptr) { (void)dlerror(); }
++    void *symbol = dlsym(RTLD_DEFAULT, name);
++    const char *error = dlerror != nullptr ? dlerror() : nullptr;
++    if (symbol == nullptr || error != nullptr) {
++        if (report.detail[0] == '\0') { Text(report.detail, name); }
++        return false;
++    }
++    function = reinterpret_cast<Function>(symbol);
++    report.presentMask |= UINT64_C(1) << index;
++    if (report.library[0] == '\0' && dladdr != nullptr) {
++        Dl_info owner{};
++        if (dladdr(symbol, &owner) != 0 && owner.dli_fname != nullptr) { Text(report.library, owner.dli_fname); }
++    }
++    return true;
++}
++
++bool Resolve(Api &api, UrmaResourceBlock &report)
++{
++    if (dlsym == nullptr) {
++        Fail(report, UrmaResourceStatus::kMissingSymbols, "dlsym unavailable");
++        Mark(report, UrmaResourceStep::kResolve, false, -1, 0);
++        return false;
++    }
++    bool ok = true;
++    // Resolve all cleanup functions before allocating anything. No init/uninit or dlopen path.
++    ok = Load(api.getDevices, "urma_get_device_list", 0U, report) && ok;
++    ok = Load(api.freeDevices, "urma_free_device_list", 1U, report) && ok;
++    ok = Load(api.getEids, "urma_get_eid_list", 2U, report) && ok;
++    ok = Load(api.freeEids, "urma_free_eid_list", 3U, report) && ok;
++    ok = Load(api.createContext, "urma_create_context", 4U, report) && ok;
++    ok = Load(api.deleteContext, "urma_delete_context", 5U, report) && ok;
++    ok = Load(api.createJfce, "urma_create_jfce", 6U, report) && ok;
++    ok = Load(api.deleteJfce, "urma_delete_jfce", 7U, report) && ok;
++    ok = Load(api.createJfc, "urma_create_jfc", 8U, report) && ok;
++    ok = Load(api.deleteJfc, "urma_delete_jfc", 9U, report) && ok;
++    ok = Load(api.createJfs, "urma_create_jfs", 10U, report) && ok;
++    ok = Load(api.deleteJfs, "urma_delete_jfs", 11U, report) && ok;
++    ok = Load(api.poll, "urma_poll_jfc", 12U, report) && ok;
++    Mark(report, UrmaResourceStep::kResolve, ok, ok ? 0 : -1, 0);
++    if (!ok) { report.status = static_cast<std::uint32_t>(UrmaResourceStatus::kMissingSymbols); }
++    return ok;
++}
++
++abi::Device *Enumerate(const Api &api, const UrmaResourceBlock &request, UrmaResourceBlock &report)
++{
++    int count = 0;
++    errno = 0;
++    abi::Device **devices = api.getDevices(&count);
++    const int error = errno;
++    const bool valid = count >= 0 && count <= kDeviceLimit && (devices != nullptr || count == 0);
++    Mark(report, UrmaResourceStep::kGetDevices, valid && devices != nullptr && count != 0, count, error);
++    if (!valid || count == 0 || devices == nullptr) {
++        Fail(report, valid ? UrmaResourceStatus::kNoDevices : UrmaResourceStatus::kMalformedApiResult,
++             "device enumeration unavailable or exceeds limit; process initialization not changed");
++        if (devices != nullptr) { api.freeDevices(devices); }
++        return nullptr;
++    }
++    report.deviceCount = static_cast<std::uint32_t>(count);
++    abi::Device *selected = nullptr;
++    const bool resourceMode = request.mode == static_cast<std::uint32_t>(UrmaResourceMode::kResources);
++    for (int i = 0; i < count; ++i) {
++        UrmaEndpoint endpoint{};
++        if (devices[i] == nullptr || !ReadName(endpoint.name,
++                reinterpret_cast<const char *>(devices[i]) + abi::kDeviceNameOffset)) {
++            Fail(report, UrmaResourceStatus::kMalformedApiResult, "invalid URMA device name/pointer");
++            break;
++        }
++        if (resourceMode && std::strcmp(endpoint.name, request.deviceName) != 0) { continue; }
++        std::memcpy(&endpoint.transport, reinterpret_cast<const std::uint8_t *>(devices[i]) +
++                    abi::kDeviceTypeOffset, sizeof(endpoint.transport));
++        endpoint.deviceOrdinal = static_cast<std::uint32_t>(i);
++        std::uint32_t eidCount = 0U;
++        errno = 0;
++        abi::EidInfo *eids = api.getEids(devices[i], &eidCount);
++        const int eidError = errno;
++        if (eidCount > kEidLimit || (eids == nullptr && (eidCount != 0U || eidError != 0))) {
++            Mark(report, UrmaResourceStep::kGetEids, false, -1, eidError);
++            Fail(report, UrmaResourceStatus::kEnumerationFailed, endpoint.name);
++            if (eids != nullptr) { api.freeEids(eids); }
++            break;
++        }
++        Mark(report, UrmaResourceStep::kGetEids, true, 0, 0);
++        report.endpointCount += eidCount;
++        for (std::uint32_t j = 0U; j < eidCount; ++j) {
++            std::memcpy(endpoint.eid, eids[j].eid.raw, sizeof(endpoint.eid));
++            endpoint.eidIndex = eids[j].index;
++            if (report.reportedCount < kUrmaEndpointLimit) {
++                report.endpoints[report.reportedCount++] = endpoint;
++            }
++            if (resourceMode && endpoint.eidIndex == request.eidIndex && endpoint.transport == abi::kTransportUb) {
++                selected = devices[i];
++                report.selected = endpoint;
++            }
++        }
++        if (eids != nullptr) { api.freeEids(eids); }
++    }
++    // This API frees the pointer array, not the framework's device objects. The reference HAL
++    // likewise selects a device, frees this array, then passes the device to create_context.
++    api.freeDevices(devices);
++    if (report.status != 0U) { return nullptr; }
++    if (resourceMode) {
++        Mark(report, UrmaResourceStep::kSelect, selected != nullptr, selected != nullptr ? 0 : -1, 0);
++        if (selected == nullptr) {
++            Fail(report, UrmaResourceStatus::kSelectionNotFound, "requested UB device/EID not listed");
++        }
++    } else if (report.endpointCount == 0U) {
++        Fail(report, UrmaResourceStatus::kNoDevices, "no EIDs available in current process state");
++    }
++    return selected;
++}
++
++bool PointerResult(UrmaResourceBlock &report, UrmaResourceStep step, const void *pointer)
++{
++    const int error = errno;
++    Mark(report, step, pointer != nullptr, pointer != nullptr ? 0 : -1, error);
++    if (pointer == nullptr) { Fail(report, UrmaResourceStatus::kApiFailed, kUrmaResourceStepNames[static_cast<unsigned>(step)]); }
++    return pointer != nullptr;
++}
++
++bool DeleteResult(UrmaResourceBlock &report, UrmaResourceStep step, std::int32_t result)
++{
++    const int error = errno;
++    Mark(report, step, result == 0, result, error);
++    if (result != 0) {
++        report.cleanupRetained = 1U;
++        Fail(report, UrmaResourceStatus::kCleanupFailed, "cleanup failed; surviving resources and their parents retained");
++    }
++    return result == 0;
++}
++
++void Resources(const Api &api, abi::Device *device, const UrmaResourceBlock &request, UrmaResourceBlock &report)
++{
++    abi::Context *context = nullptr;
++    abi::Jfce *event = nullptr;
++    abi::Jfc *completion = nullptr;
++    abi::Jfs *send = nullptr;
++    abi::JfcConfig completionConfig{};
++    abi::JfsConfig sendConfig{};
++    abi::Completion record{};
++    do {
++        errno = 0;
++        context = api.createContext(device, request.eidIndex);
++        if (!PointerResult(report, UrmaResourceStep::kCreateContext, context)) { break; }
++        errno = 0;
++        event = api.createJfce(context);
++        if (!PointerResult(report, UrmaResourceStep::kCreateJfce, event)) { break; }
++        completionConfig.depth = request.queueDepth;
++        completionConfig.event = event;
++        completionConfig.userContext = request.cookie; // Identity only; never a request-memory pointer.
++        errno = 0;
++        completion = api.createJfc(context, &completionConfig);
++        if (!PointerResult(report, UrmaResourceStep::kCreateJfc, completion)) { break; }
++        sendConfig.depth = request.queueDepth;
++        sendConfig.mode = abi::kReliableMessage;
++        sendConfig.maxSge = 1U;
++        sendConfig.maxRemoteSge = 1U;
++        sendConfig.rnrRetry = 3U;
++        sendConfig.errorTimeout = 12U;
++        sendConfig.completion = completion;
++        sendConfig.userContext = request.cookie;
++        errno = 0;
++        send = api.createJfs(context, &sendConfig);
++        if (!PointerResult(report, UrmaResourceStep::kCreateJfs, send)) { break; }
++        errno = 0;
++        const int polled = api.poll(completion, 1, &record);
++        const int pollError = errno;
++        Mark(report, UrmaResourceStep::kPoll, polled == 0, polled, pollError);
++        if (polled != 0) {
++            Fail(report, polled < 0 ? UrmaResourceStatus::kApiFailed : UrmaResourceStatus::kUnexpectedCompletion,
++                 "expected zero completions: no work was posted");
++        }
++    } while (false);
++    // No WR was posted. Stop at the first teardown failure rather than releasing a live child's parent.
++    if (send != nullptr) {
++        errno = 0;
++        if (!DeleteResult(report, UrmaResourceStep::kDeleteJfs, api.deleteJfs(send))) { return; }
++    }
++    if (completion != nullptr) {
++        errno = 0;
++        if (!DeleteResult(report, UrmaResourceStep::kDeleteJfc, api.deleteJfc(completion))) { return; }
++    }
++    if (event != nullptr) {
++        errno = 0;
++        if (!DeleteResult(report, UrmaResourceStep::kDeleteJfce, api.deleteJfce(event))) { return; }
++    }
++    if (context != nullptr) {
++        errno = 0;
++        (void)DeleteResult(report, UrmaResourceStep::kDeleteContext, api.deleteContext(context));
++    }
++}
++} // namespace
++
++std::int32_t RunUrmaResourceProbe(const std::uint64_t anchorAddr)
++{
++    if (anchorAddr == 0U || anchorAddr % alignof(UrmaResourceBlock) != 0U ||
++        anchorAddr > static_cast<std::uint64_t>(UINTPTR_MAX) - (sizeof(UrmaResourceBlock) - 1U)) {
++        return kStatusBadArgs;
++    }
++    auto *request = reinterpret_cast<UrmaResourceBlock *>(static_cast<std::uintptr_t>(anchorAddr));
++    const bool list = request->mode == static_cast<std::uint32_t>(UrmaResourceMode::kList);
++    char checkedName[64]{};
++    if (request->magic != kUrmaResourceMagic || request->version != kUrmaResourceVersion ||
++        request->bytes != sizeof(UrmaResourceBlock) || request->cookie == 0U ||
++        request->abiTag != abi::kLayoutTag || request->queueDepth != kUrmaResourceDepth ||
++        (!list && request->mode != static_cast<std::uint32_t>(UrmaResourceMode::kResources)) ||
++        !ReadName(checkedName, request->deviceName, list) ||
++        (list && (request->deviceName[0] != '\0' || request->eidIndex != 0U))) {
++        return kStatusBadArgs;
++    }
++    for (auto word : request->reserved) { if (word != 0U) { return kStatusBadArgs; } }
++    UrmaResourceBlock report{};
++    report.echoedCookie = request->cookie;
++    report.initPolicy = 1U;
++#if defined(__aarch64__)
++    report.architecture = 1U;
++#elif defined(__x86_64__)
++    report.architecture = 2U;
++#endif
++    Api api{};
++    if (Resolve(api, report)) {
++        abi::Device *device = Enumerate(api, *request, report);
++        if (device != nullptr && report.status == 0U && !list) { Resources(api, device, *request, report); }
++    }
++    const auto *source = reinterpret_cast<const std::uint8_t *>(&report);
++    auto *dest = reinterpret_cast<std::uint8_t *>(request);
++    for (std::size_t i = offsetof(UrmaResourceBlock, status); i < sizeof(UrmaResourceBlock); ++i) {
++        dest[i] = source[i];
++    }
++    PublishWord(&request->done, 1U);
++    return kStatusOk; // Capability/API failure is reported separately from native task execution.
++}
++} // namespace secure_dma

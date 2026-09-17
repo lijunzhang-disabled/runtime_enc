@@ -1,0 +1,16 @@
+probe=aicpu_urma_symbols version=1 device=0 allow_load=0 timeout_ms=10000
+loaded_runtime=/home/zlj/cann/cann-9.1.T560/aarch64-linux/lib64/libruntime.so
+ASCEND_AICPU_PATH=/home/zlj/cann/cann-9.1.T560 dispatch=platform_by_name
+step=set_device OK code=0
+step=create_stream OK code=0
+step=allocate_report OK code=0
+step=write_request OK code=0
+step=launch OK code=0
+step=synchronize OK code=0
+step=read_report OK code=0
+report=VALID status=symbols_available architecture=AArch64 source=process
+symbol_owner=/usr/lib64/liburma.so.0
+symbols_present=27 symbols_checked=27
+step=free_report OK code=0
+step=destroy_stream OK code=0
+RESULT aicpu_urma_symbols=PASS device_queue_creation=NOT_TESTED device_send=NOT_TESTED graph_replay=NOT_TESTED

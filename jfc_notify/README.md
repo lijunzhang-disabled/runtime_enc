@@ -1,9 +1,12 @@
 # JFC notification experiment: first step
 
-**Current step:** Host receive resources passed on the target. The AICPU URMA symbol probe is now
-prepared on local AICPU branch `iter-007-zlj`, based on `iter-007`. Build those changes through the
-existing online CI, deploy the resulting platform package, then use the [NPU 0 instructions below](#aicpu-symbol-probe-ci-and-target-run).
-Target execution of this new probe is pending.
+**Current step:** Host receive resources and the AICPU URMA symbol probe have both passed on the
+target. On 2026-09-17 the updated `SecureDma` diagnostic executed successfully on NPU logical ID 0;
+all 27 URMA symbols resolved from the process scope with explicit loading disabled. The next probe
+is now implemented: AICPU `--list` and `--resources` use existing process initialization to enumerate
+local endpoints and check creation/cleanup of device send resources. Its CI rebuild and target run
+are pending. Start with the [version-2 instructions](#aicpu-device-resource-probe-version-2).
+Device SEND and graph replay remain untested.
 
 Start with a Host inventory on the actual UB machine. This identifies the installed driver, URMA library/provider candidates, headers, and exported entry points needed to build the first functional probe.
 
@@ -191,14 +194,16 @@ Initially return the device diagnostic report through native task completion plu
 ## AICPU symbol probe: CI and target run
 
 The AICPU repository is on **`iter-007-zlj`**, created from `iter-007` at `5967dee`.
-The probe changes are local and uncommitted; no remote branch or CI job has been published or started.
-Include the working-tree changes when submitting this branch through the normal CI workflow.
+On 2026-09-17 the user reported a successful online CI build after correcting the missing CI tag.
+The actual CI tag/artifact revision has not been recorded here. That package passed the symbol probe.
+The new resource modes require another CI build from the current source and matching Host headers.
 
-The new `UMP1` diagnostic descriptor is routed through the existing `SecureDma` entry. The platform
-source list includes `secure_dma_urma_probe.cc`. Its protocol header is shared directly with the Host
-launcher. No Runtime source patch, new operator registration, or URMA development headers are required
-for this stage. CI must include the updated `secure_dma_device.cc`, source-list fragment, and all three
-new `secure_dma_urma_probe*` files from `ms_kernels/src/secure_dma/`.
+The `UMP1` symbol descriptor and new `UMP2` resource descriptor are routed through the existing
+`SecureDma` entry. The platform source list includes `secure_dma_urma_probe.cc` and
+`secure_dma_urma_resource_probe.cc`. The protocol and ABI headers are shared directly with the Host
+launcher. No Runtime source patch, new operator registration, or URMA SDK headers in CI are required.
+Sync the updated `secure_dma_device.cc`, source-list fragment, and entire `ms_kernels/src/secure_dma/`
+directory through the existing copy commands.
 
 If CI reports `secure_dma_test_key_binding.cc` missing, sync the corrected
 `ms_kernels/secure_dma_v2.cmake`: it contains only device-source paths. The platform build should consume `SECURE_DMA_V2_SOURCES` and
@@ -211,14 +216,15 @@ encrypted-copy runs still need their existing device key binding.
 
 The user's five copy commands (entry header, `secure_dma_v2.cmake`, the complete `src/secure_dma`
 directory, the two `secure_dma_kernels` files, and the JSON/INI registration files) were checked in
-an isolated platform tree. All eight source-list entries and project-local includes resolve.
+an isolated platform tree. All nine source-list entries and project-local includes resolve.
 The platform still supplies its existing framework headers and include directories. The managed
 block should append only `${SECURE_DMA_V2_SOURCES}` for this probe; the extra
 `${CMAKE_CURRENT_SOURCE_DIR}/src/secure_dma_test_key_binding.cc` is not supplied by those copies.
 The corrected block and architecture condition are recorded in the
 [AICPU integration instructions](../../AscendCCv2-AICPU/README.md#dropping-it-into-the-platform).
 Both native and compiler-path AArch64 detection were checked at CMake generation time; this is not
-a completed platform build.
+a completed platform build. The user-reported successful platform build above covered the symbol
+probe; the version-2 resource additions still need CI compilation and deployment.
 
 After CI builds and you deploy the updated `libaicpu_kernels.so` package using your usual flow, start
 a fresh probe process with the reported settings:
@@ -232,13 +238,14 @@ by name with the built-in AICPU scheduler, the same mode selected by Runtime's e
 It calls public Runtime APIs directly. `ASCEND_SECURE_MEMCPY` and its key are not required for this
 diagnostic; it sends no encrypted-copy request and does not resolve a key.
 
-On the target, place these three files together in your `jfc_notify` directory:
+On the target, place these four files together in your `jfc_notify` directory:
 
 - [`aicpu_urma_probe.cpp`](aicpu_urma_probe.cpp)
 - [`build_aicpu_probe.sh`](build_aicpu_probe.sh)
 - [`secure_dma_urma_probe_protocol.h`](../../AscendCCv2-AICPU/ms_kernels/src/secure_dma/secure_dma_urma_probe_protocol.h), copied from the same AICPU revision used by CI
+- [`secure_dma_urma_probe_abi.h`](../../AscendCCv2-AICPU/ms_kernels/src/secure_dma/secure_dma_urma_probe_abi.h), from that same revision
 
-If the complete workspace layout is present, the builder also finds the protocol header in the sibling
+If the complete workspace layout is present, the builder also finds both headers in the sibling
 AICPU checkout. Build and run on **NPU logical ID 0**:
 
 ```bash
@@ -249,11 +256,13 @@ cat aicpu-urma-symbols.txt
 
 The builder locates Runtime under `$ASCEND_AICPU_PATH` (or `CANN_ROOT`). Overrides are
 `RUNTIME_INCLUDE_DIR` (directory containing `runtime/kernel.h`), `RUNTIME_LIBRARY`,
-`PROBE_PROTOCOL_DIR`, `AICPU_ROOT`, `CXX`, and `PROBE_OUTPUT`. Use the workload's usual Runtime/library
+`PROBE_PROTOCOL_DIR`, `AICPU_ROOT`, `URMA_INCLUDE_DIR`, `CXX`, and `PROBE_OUTPUT`. Use the workload's usual Runtime/library
 environment; the probe prints the library supplying `rtSetDevice` as `loaded_runtime`.
 
-The default device probe checks 27 URMA symbols in `RTLD_DEFAULT`. If native execution succeeds but
-reports missing symbols, run the optional explicit-load variant in another fresh process:
+The default device probe checks 27 URMA symbols in `RTLD_DEFAULT`. If native execution and cleanup
+succeed with a valid report but status is `library_unavailable` or `missing_symbols`, run the optional
+explicit-load variant in another fresh process. For `loader_unavailable` or an execution failure,
+share the first report before proceeding:
 
 ```bash
 ./aicpu_urma_probe --device 0 --allow-load > aicpu-urma-load.txt 2>&1
@@ -269,7 +278,7 @@ uninitialized. If the first opened library lacks symbols, its result is reported
 multiple library versions. `symbol_owner` is the owner of one resolved symbol, not an assertion that all
 symbols come from that file; if owner lookup fails after an explicit open, it falls back to the soname.
 
-Each run allocates a 640-byte device report, performs one synchronous H2D setup copy, launches one native
+Each symbol-mode run allocates a 640-byte device report, performs one synchronous H2D setup copy, launches one native
 task, waits for stream completion, then performs one synchronous D2H report copy. There is no Host loop
 that repeatedly DMA-reads a device status word. The native Runtime/driver may perform its own internal
 work; this probe does not count that work or measure notification latency. `--timeout-ms` sets the
@@ -293,6 +302,112 @@ Share the short text output. Even a PASS leaves `device_queue_creation`, `device
 context; it does not identify the device's UB endpoint, establish URMA initialization ownership, prove
 ABI compatibility, create a JFS, or deliver a Host CQE. Those are subsequent steps.
 
+### AICPU symbol result: PASS on NPU 0
+
+The user supplied the [complete short result](aicpu_symbols_result_2026-09-17.txt) on 2026-09-17.
+This is target evidence from the updated `SecureDma` diagnostic, distinct from local mock checks.
+
+| Check | Observed result |
+| --- | --- |
+| NPU logical ID | `0` |
+| Host Runtime library | `/home/zlj/cann/cann-9.1.T560/aarch64-linux/lib64/libruntime.so` |
+| Dispatch | Platform by name, with `ASCEND_AICPU_PATH=/home/zlj/cann/cann-9.1.T560` |
+| Native launch, synchronization, report copy | All returned success |
+| Device report | Valid; `architecture=AArch64`; `status=symbols_available` |
+| Symbol lookup | All 27 available from process scope; `allow_load=0` |
+| Reported symbol owner in the AICPU process | `/usr/lib64/liburma.so.0` |
+| Host buffer and stream cleanup | Both returned success |
+
+This proves that the deployed AICPU execution path recognizes the new diagnostic and can resolve the
+URMA entry points. The optional `--allow-load` run is unnecessary for this result. The owner path
+identifies one resolved symbol; it does not establish the exact device library build or equivalence
+to the Host's previously reported `/usr/lib64/liburma.so.0.0.3`.
+
+No URMA function was called in this probe. Library visibility therefore does not prove successful
+URMA/provider initialization, device enumeration, permission to create queues, or a route to the Host
+receiver. The reference HAL's `ascend_urma_init` constructor calls `urma_init`; that source is a reason
+to preserve framework-owned initialization, not proof that initialization succeeded in this run.
+
+The next experiment is implemented below. The default symbol mode remains compatible with `UMP1`;
+there is no need to repeat `--allow-load` after this PASS.
+
+### AICPU device-resource probe: version 2
+
+First sync the existing five AICPU copy groups into the online CI build, rebuild, and install the new
+ops package using the usual flow. No additional copy group, test file, or managed CMake change is
+needed. The new device source and ABI header are inside the recursively copied `src/secure_dma/`.
+Update the four Host files listed above from the same revision, then run on the target:
+
+```bash
+export ASCEND_AICPU_PATH=/home/zlj/cann/cann-9.1.T560
+bash build_aicpu_probe.sh
+./aicpu_urma_probe --device 0 --list > aicpu-urma-devices.txt 2>&1
+cat aicpu-urma-devices.txt
+```
+
+The builder defaults `URMA_INCLUDE_DIR` to `/usr/include/ub/umdk/urma`. It checks every used URMA
+structure layout against those installed headers at compile time. Missing headers allow a
+symbol-only build; the launcher rejects resource modes before submitting device work. A layout
+mismatch fails compilation. The Host launcher still links only Runtime and libdl, not liburma.
+
+`--list` resolves the 13 resource/cleanup APIs in the AICPU process, calls `urma_get_device_list` and
+`urma_get_eid_list`, and frees their result arrays. It prints at most 32 device/EID rows, with totals
+and an omitted count. It creates no context or queues. A PASS establishes enumeration in that
+execution context; it does not identify which endpoint routes to the Host receiver.
+
+After inspecting that output, use an exact UB device name and EID index from the **AICPU** list:
+
+```bash
+# Replace NAME_FROM_AICPU_LIST and INDEX with values from the preceding output.
+./aicpu_urma_probe --device 0 --resources \
+  --urma-device NAME_FROM_AICPU_LIST --eid-index INDEX \
+  > aicpu-urma-resources.txt 2>&1
+cat aicpu-urma-resources.txt
+```
+
+Do not reuse `udmac0d1e2` merely because it passed the earlier Host probe. This mode rechecks the
+explicit selection, creates its own context → JFCE → JFC → JFS, polls the JFC once, and deletes
+JFS → JFC → JFCE → context. Both queues request depth 16; the JFS uses reliable-message transport,
+one local/remote SGE, no inline payload, RNR retry 3, and error timeout 12. A zero poll result is
+expected because no work was posted. Queue creation validates this small configuration only.
+
+Both modes borrow existing process state: no explicit load, `urma_init`, or `urma_uninit` call.
+An unavailable device list is reported with the return value/errno; there is no automatic
+reinitialization. This policy preserves initialization owned elsewhere without claiming which
+component initialized URMA. The new resource descriptor is 3968 bytes and uses the same one setup
+H2D copy, native launch/synchronization, and one D2H report copy as the symbol probe. There is no
+repeated Host DMA status-read loop.
+
+All cleanup entry points must resolve before allocation begins. If a deletion fails, cleanup stops
+before releasing the surviving resource's parents and prints
+`device_cleanup=INCOMPLETE surviving_resources_retained=1`. Resource
+configuration contains a numeric cookie, not a pointer to the report or a temporary payload.
+Confirmed native completion therefore still permits freeing the report. A cleanup failure returns
+FAIL; surviving URMA objects are left in that AICPU process rather than forcibly uninitializing it.
+
+| Result | Meaning |
+| --- | --- |
+| `aicpu_urma_devices=PASS` / exit 0 | Valid AArch64 report, resource APIs resolved, devices/EIDs enumerated, Host cleanup succeeded |
+| `aicpu_urma_resources=PASS` / exit 0 | Exact selection, all four allocations, zero-result poll, device teardown, and Host cleanup succeeded |
+| `UNAVAILABLE` / exit 3 | Valid report but required symbols or devices/EIDs unavailable in existing process state |
+| `FAIL` / exit 1 | API/selection/cleanup, native execution, architecture, or report-validation failure |
+| Usage error / exit 2 | Invalid options or resource-mode build prerequisites missing; no device request submitted |
+
+The ABI declaration follows the inspected LP64 driver/HCOMM API 0.9 layouts. The Host-header check
+does **not** verify the ABI/build of the separately loaded AICPU library. The report prints
+`device_library_abi=UNCONFIRMED`; the target run remains necessary to establish the exercised API
+path. An old symbol-only AICPU package cannot handle `UMP2`.
+
+This experiment performs no memory registration, remote endpoint import, SEND/READ/WRITE, or event
+wait. It reports `device_send=NOT_TESTED graph_replay=NOT_TESTED`. All successfully created device
+resources are destroyed during the run; it exports no queue identifiers for a later sender.
+
+After device resource setup passes, keep a Host JFR receiver alive while testing one synthetic SEND.
+The earlier Host resource probe also destroyed its queues on exit; those old identifiers cannot be reused.
+Require both the device-local send completion and the Host receive completion before progressing to
+repeated notifications or graph replay. The current `FixedQueue` FULL/EMPTY protocol remains the
+baseline while this separate notification path is evaluated.
+
 ### Local validation of the new probe
 
 ```bash
@@ -310,6 +425,13 @@ These checks use CPU memory, portable Host fences, and the Host crypto backend. 
 `SECURE_DMA_DEVICE_BUILD` and AArch64 barrier guard remain intact. They do not validate AICPU framework
 linking, real cache visibility, URMA provider initialization, or NPU behavior. The AICPU repository's
 `test/` directory retains its existing contents from `iter-007`.
+
+For the version-2 change, separate temporary `/tmp` harnesses exercised 54 device-logic cases under
+UndefinedBehaviorSanitizer and 46 launcher cases with mock URMA/Runtime. They covered selection,
+bounded enumeration, partial setup failures, dependency-safe teardown failures, malformed reports,
+and synchronization failure without early release. Both passed. The launcher ABI assertions also
+compiled against the inspected HCOMM and driver header snapshots. These are local CPU/mock results,
+not CI or hardware results; no new test files were added to either repository or the CI copy set.
 
 ## Local preparation findings
 
